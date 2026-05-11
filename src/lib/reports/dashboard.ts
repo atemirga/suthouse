@@ -29,7 +29,8 @@ export interface DashboardData {
     receivablesOverdue30: number; // просрочка 30+ дн
     receivablesCount: number;   // число должников
     prepayments: number;        // авансы получ.
-    discountsGiven: number;     // дано скидок за период
+    discountsGiven: number;     // дано скидок за период (сумма)
+    discountsPct: number;       // % скидок от валовой выручки (до скидки)
   };
   // Сравнение с предыдущим периодом (% delta)
   deltas: {
@@ -134,7 +135,7 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     buildReceivables({ asOf: period.to, limit: 10 }),
     prisma.realizaciaItem.aggregate({
       where: { realizacia: { date: { gte: period.from, lte: period.to }, posted: true } },
-      _sum: { discount: true },
+      _sum: { discount: true, amount: true },
     }),
     prisma.realizacia.groupBy({
       by: ['responsibleName'],
@@ -320,6 +321,12 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
       receivablesCount: receivables.totals.debtorCount,
       prepayments: receivables.totals.prepayments,
       discountsGiven: discountAgg._sum.discount || 0,
+      discountsPct: (() => {
+        const disc = discountAgg._sum.discount || 0;
+        const amt = discountAgg._sum.amount || 0;
+        const gross = amt + disc; // валовая выручка до скидки
+        return gross > 0 ? (disc / gross) * 100 : 0;
+      })(),
     },
     deltas: {
       revenue: delta(report.grandTotal.revenue, prevReport.grandTotal.revenue),

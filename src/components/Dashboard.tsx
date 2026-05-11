@@ -130,7 +130,13 @@ export default function Dashboard({ initialData, lastSync, unmappedCount }: Dash
         <MiniKpi label="Поступило" value={fmtCompact(kpi.cashIn)} suffix="₸" valueColor="text-emerald-700" />
         <MiniKpi label="Списано" value={fmtCompact(kpi.cashOut)} suffix="₸" valueColor="text-rose-700" />
         <MiniKpi label="Сделок" value={String(kpi.txCount)} sub={fmtCompact(kpi.avgCheck) + ' ₸ ср.чек'} />
-        <MiniKpi label="Скидки выданы" value={fmtCompact(kpi.discountsGiven)} suffix="₸" valueColor="text-amber-700" />
+        <MiniKpi
+          label="Скидки выданы"
+          value={fmtCompact(kpi.discountsGiven)}
+          suffix="₸"
+          sub={kpi.discountsPct > 0 ? kpi.discountsPct.toFixed(2) + '% от вал. выручки' : undefined}
+          valueColor="text-amber-700"
+        />
       </div>
 
       {loading && (
