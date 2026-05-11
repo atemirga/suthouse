@@ -1,0 +1,306 @@
+// SUT HOUSE — Финансовая отчётность
+// Схема БД: справочники, документы из 1С, настройки и корректировки
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ═══════════════════════════════════════
+// СПРАВОЧНИКИ
+// ═══════════════════════════════════════
+
+model Kontragent {
+  id          String   @id // Ref_Key
+  name        String
+  parentId    String?
+  responsible String?
+  isFolder    Boolean  @default(false)
+  syncedAt    DateTime @default(now())
+
+  @@index([name])
+}
+
+model DdsArticle {
+  id           String   @id
+  name         String
+  parentId     String?
+  isFolder     Boolean  @default(false)
+  // Категория ОПиУ — настраивается пользователем
+  // revenue | cogs | var_expenses | payroll | rent | marketing | admin |
+  // logistics | taxes | interest | other_income | other_expense |
+  // capex | financing_in | financing_out
+  opiuCategory String?
+  // Раздел ДДС: operating | investing | financing | transfer | exclude
+  ddsSection   String?  @default("operating")
+  syncedAt     DateTime @default(now())
+
+  @@index([name])
+}
+
+model Nomenclature {
+  id       String   @id
+  name     String
+  parentId String?
+  isFolder Boolean  @default(false)
+  syncedAt DateTime @default(now())
+}
+
+model Kassa {
+  id       String   @id
+  name     String
+  syncedAt DateTime @default(now())
+}
+
+model BankAccount {
+  id       String   @id
+  name     String
+  syncedAt DateTime @default(now())
+}
+
+model User1C {
+  id       String   @id
+  name     String
+  syncedAt DateTime @default(now())
+}
+
+// ═══════════════════════════════════════
+// ДДС: 4 типа документов + перемещения
+// ═══════════════════════════════════════
+
+model DdsDocument {
+  id             String   @id
+  // PostuplenieVKassu | RashodIzKassy | PostuplenieNaSchet | RashodSoScheta | PeremeschenieDC
+  docType        String
+  // inflow | outflow | transfer
+  // transfer проставляется не только для PeremeschenieDC, но и для ВидОперации:
+  // ПереводНаДругойСчет, ПолучениеНаличныхВБанке, ВзносНаличнымиВБанк
+  direction      String
+  date           DateTime
+  number         String
+  amount         Float
+  commission     Float    @default(0) // СуммаКомиссииДокумента (банковская/эквайринг)
+  kontragentId   String?
+  kontragentName String?
+  operationType  String?
+  articleId      String?
+  articleName    String?
+  kassaId        String?
+  kassaName      String?
+  // Для ПеремещениеДС — касса-получатель
+  kassaToId      String?
+  kassaToName    String?
+  accountId      String?
+  accountName    String?
+  comment        String?
+  paymentPurpose String? // НазначениеПлатежа (для платёжек) — обогащает drill-down
+  posted         Boolean  @default(true)
+  syncedAt       DateTime @default(now())
+
+  @@index([date])
+  @@index([articleId])
+  @@index([kontragentId])
+  @@index([docType])
+  @@index([direction])
+}
+
+// ═══════════════════════════════════════
+// РЕАЛИЗАЦИИ
+// ═══════════════════════════════════════
+
+model Realizacia {
+  id              String           @id
+  date            DateTime
+  number          String
+  kontragentId    String?
+  kontragentName  String?
+  responsibleId   String?
+  responsibleName String?
+  operationType   String?
+  totalAmount     Float            @default(0)
+  totalCost       Float            @default(0)
+  comment         String?
+  posted          Boolean          @default(true)
+  syncedAt        DateTime         @default(now())
+  items           RealizaciaItem[]
+
+  @@index([date])
+  @@index([kontragentId])
+}
+
+model RealizaciaItem {
+  id               String     @id @default(cuid())
+  realizaciaId     String
+  realizacia       Realizacia @relation(fields: [realizaciaId], references: [id], onDelete: Cascade)
+  nomenclatureId   String?
+  nomenclatureName String?
+  quantity         Float      @default(0)
+  price            Float      @default(0)
+  amount           Float      @default(0)
+  discount         Float      @default(0)
+  costPrice        Float      @default(0) // закупочная цена за единицу
+  costAmount       Float      @default(0) // costPrice * quantity
+
+  @@index([realizaciaId])
+  @@index([nomenclatureId])
+}
+
+// ═══════════════════════════════════════
+// ЗАКУПКИ
+// ═══════════════════════════════════════
+
+model Zakupka {
+  id             String        @id
+  date           DateTime
+  number         String
+  kontragentId   String?
+  kontragentName String?
+  totalAmount    Float         @default(0)
+  operationType  String?       // ПоступлениеОтПоставщика | ВозвратОтПокупателя
+  // true для ВозвратОтПокупателя — такой документ НЕ учитывается в карте
+  // последних закупочных цен (иначе цена возврата перепишет реальную закупочную)
+  isReturn       Boolean       @default(false)
+  posted         Boolean       @default(true)
+  syncedAt       DateTime      @default(now())
+  items          ZakupkaItem[]
+
+  @@index([date])
+  @@index([isReturn])
+}
+
+model ZakupkaItem {
+  id               String  @id @default(cuid())
+  zakupkaId        String
+  zakupka          Zakupka @relation(fields: [zakupkaId], references: [id], onDelete: Cascade)
+  nomenclatureId   String?
+  nomenclatureName String?
+  quantity         Float   @default(0)
+  price            Float   @default(0)
+  amount           Float   @default(0)
+
+  @@index([zakupkaId])
+  @@index([nomenclatureId])
+}
+
+// ═══════════════════════════════════════
+// ЗАКАЗЫ ПОКУПАТЕЛЕЙ
+// ═══════════════════════════════════════
+
+model OrderBuyer {
+  id              String    @id
+  date            DateTime
+  number          String
+  kontragentId    String?
+  kontragentName  String?
+  responsibleId   String?
+  responsibleName String?
+  totalAmount     Float     @default(0)
+  paidAmount      Float     @default(0)
+  status          String?
+  shipmentDate    DateTime?
+  comment         String?
+  posted          Boolean   @default(true)
+  syncedAt        DateTime  @default(now())
+
+  @@index([date])
+  @@index([status])
+  @@index([kontragentId])
+}
+
+// ═══════════════════════════════════════
+// СПИСАНИЯ И ОПРИХОДОВАНИЯ
+// ═══════════════════════════════════════
+
+model WriteOff {
+  id              String         @id
+  date            DateTime
+  number          String
+  totalAmount     Float          @default(0)
+  responsibleName String?
+  comment         String?
+  posted          Boolean        @default(true)
+  syncedAt        DateTime       @default(now())
+  items           WriteOffItem[]
+
+  @@index([date])
+}
+
+model WriteOffItem {
+  id               String   @id @default(cuid())
+  writeOffId       String
+  writeOff         WriteOff @relation(fields: [writeOffId], references: [id], onDelete: Cascade)
+  nomenclatureId   String?
+  nomenclatureName String?
+  quantity         Float    @default(0)
+  amount           Float    @default(0)
+}
+
+model Capitalization {
+  id              String               @id
+  date            DateTime
+  number          String
+  totalAmount     Float                @default(0)
+  responsibleName String?
+  comment         String?
+  posted          Boolean              @default(true)
+  syncedAt        DateTime             @default(now())
+  items           CapitalizationItem[]
+
+  @@index([date])
+}
+
+model CapitalizationItem {
+  id               String         @id @default(cuid())
+  capitalizationId String
+  capitalization   Capitalization @relation(fields: [capitalizationId], references: [id], onDelete: Cascade)
+  nomenclatureId   String?
+  nomenclatureName String?
+  quantity         Float          @default(0)
+  amount           Float          @default(0)
+}
+
+// ═══════════════════════════════════════
+// НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ
+// ═══════════════════════════════════════
+
+model AccrualRule {
+  id        String   @id @default(cuid())
+  articleId String   @unique
+  months    Int
+  method    String   @default("equal") // equal | front
+  createdAt DateTime @default(now())
+}
+
+model FixedAsset {
+  id           String   @id @default(cuid())
+  name         String
+  cost         Float
+  usefulMonths Int      @default(60)
+  startDate    DateTime
+  method       String   @default("linear")
+  createdAt    DateTime @default(now())
+}
+
+model ManualAdjustment {
+  id        String   @id @default(cuid())
+  month     String   // "2026-01"
+  category  String
+  amount    Float
+  comment   String?
+  createdAt DateTime @default(now())
+
+  @@index([month])
+}
+
+model SyncLog {
+  id         String    @id @default(cuid())
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  status     String    @default("running") // running | success | error
+  details    String? // JSON
+  error      String?
+}
