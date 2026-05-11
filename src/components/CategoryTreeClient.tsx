@@ -126,7 +126,7 @@ function TreeRow({ n, expanded, toggle, maxRev, totalRev }:
                 <IconChevronDown width={12} height={12} className={'transition-transform ' + (isOpen ? '' : '-rotate-90')} />
               </button>
             ) : <span className="w-4" />}
-            <span className={n.isFolder ? 'font-medium' : 'text-gray-700'}>{n.name}</span>
+            <span className={hasChildren ? 'font-medium' : 'text-gray-700'}>{n.name}</span>
             {hasChildren && <span className="text-[10px] text-gray-400 ml-1">({n.children.length})</span>}
           </div>
         </td>

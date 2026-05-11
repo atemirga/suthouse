@@ -169,13 +169,42 @@ export async function syncDdsArticles() {
   return count;
 }
 
-export async function syncNomenclature() {
-  const rows = await fetchAllOData<CatRow>('Catalog_Номенклатура', {
-    select: 'Ref_Key,Description,Parent_Key,IsFolder',
+// Catalog_КатегорииНоменклатуры — управленческие категории товаров
+// (Курт, Ірімшік, Май и т.п.). Это правильный источник «По категориям» в отчётах.
+export async function syncNomenclatureCategories() {
+  const rows = await fetchAllOData<CatRow>('Catalog_КатегорииНоменклатуры', {
+    select: 'Ref_Key,Description,Parent_Key',
   });
   let count = 0;
   for (const r of rows) {
     if (emptyKey(r.Ref_Key)) continue;
+    await prisma.nomenclatureCategory.upsert({
+      where: { id: r.Ref_Key },
+      create: {
+        id: r.Ref_Key,
+        name: normalizeName(r.Description) || '[без названия]',
+        parentId: emptyKey(r.Parent_Key) ? null : r.Parent_Key,
+      },
+      update: {
+        name: normalizeName(r.Description) || '[без названия]',
+        parentId: emptyKey(r.Parent_Key) ? null : r.Parent_Key,
+        syncedAt: new Date(),
+      },
+    });
+    count++;
+  }
+  return count;
+}
+
+export async function syncNomenclature() {
+  const rows = await fetchAllOData<CatRow & { КатегорияНоменклатуры_Key?: string }>(
+    'Catalog_Номенклатура',
+    { select: 'Ref_Key,Description,Parent_Key,IsFolder,КатегорияНоменклатуры_Key' },
+  );
+  let count = 0;
+  for (const r of rows) {
+    if (emptyKey(r.Ref_Key)) continue;
+    const categoryId = !emptyKey(r.КатегорияНоменклатуры_Key) ? r.КатегорияНоменклатуры_Key! : null;
     await prisma.nomenclature.upsert({
       where: { id: r.Ref_Key },
       create: {
@@ -183,11 +212,13 @@ export async function syncNomenclature() {
         name: normalizeName(r.Description) || '[без названия]',
         parentId: emptyKey(r.Parent_Key) ? null : r.Parent_Key,
         isFolder: !!r.IsFolder,
+        categoryId,
       },
       update: {
         name: normalizeName(r.Description) || '[без названия]',
         parentId: emptyKey(r.Parent_Key) ? null : r.Parent_Key,
         isFolder: !!r.IsFolder,
+        categoryId,
         syncedAt: new Date(),
       },
     });
@@ -248,12 +279,22 @@ export async function syncUsers() {
 // Catalog_Сотрудники — реальные менеджеры (Жанис, Акат, Нурхуда…), на которых
 // ссылается «Ответственный» в Заказах и Реализациях. НЕ путать с Catalog_Пользователи
 // (Админ, Salamat, SSL — системные пользователи).
+//
+// ДОПОЛНИТЕЛЬНО мы тянем сюда же Catalog_ФизическиеЛица — на физлица ссылаются
+// поля типа «Курьер_Key» в заказе. ID физлица и сотрудника — разные namespace,
+// поэтому в Employee они мирно сосуществуют без конфликтов.
 export async function syncEmployees() {
-  const rows = await fetchAllOData<CatRow>('Catalog_Сотрудники', {
-    select: 'Ref_Key,Description,Parent_Key,IsFolder',
-  });
+  const [employees, physicals] = await Promise.all([
+    fetchAllOData<CatRow>('Catalog_Сотрудники', {
+      select: 'Ref_Key,Description,Parent_Key,IsFolder',
+    }),
+    fetchAllOData<CatRow>('Catalog_ФизическиеЛица', {
+      select: 'Ref_Key,Description,Parent_Key,IsFolder',
+    }),
+  ]);
+
   let count = 0;
-  for (const r of rows) {
+  for (const r of [...employees, ...physicals]) {
     if (emptyKey(r.Ref_Key)) continue;
     const parentId = r.Parent_Key && !emptyKey(r.Parent_Key) ? r.Parent_Key : null;
     await prisma.employee.upsert({
@@ -283,6 +324,8 @@ export async function syncAllCatalogs() {
     syncEmployees(),
     syncAttractionSources(),
   ]);
+  // Категории номенклатуры нужны до самой номенклатуры (для resolve КатегорияНоменклатуры_Key).
+  const nomCategories = await syncNomenclatureCategories();
   const [kontragenty, articles, nom, kassy, banks] = await Promise.all([
     syncKontragenty(),
     syncDdsArticles(),
@@ -290,5 +333,5 @@ export async function syncAllCatalogs() {
     syncKassy(),
     syncBankAccounts(),
   ]);
-  return { users, employees, sources, kontragenty, articles, nomenclature: nom, kassy, banks };
+  return { users, employees, sources, kontragenty, articles, nomenclature: nom, nomCategories, kassy, banks };
 }

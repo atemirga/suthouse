@@ -53,30 +53,33 @@ export async function buildPlanFact(): Promise<PlanFactReport> {
       });
       amountFact = agg._sum.totalAmount || 0;
     } else if (p.scope === 'category' && p.scopeId) {
-      // Все позиции, чья номенклатура (или родители) = scopeId.
-      // Делаем рекурсивный CTE через raw SQL для точного дерева.
-      // Для простоты: тянем все nomenclatureId в дереве этой категории, потом aggregate.
-      const allNomen = await prisma.nomenclature.findMany({ select: { id: true, parentId: true } });
-      const childrenOf = new Map<string, string[]>();
-      for (const n of allNomen) {
-        if (n.parentId) {
-          let arr = childrenOf.get(n.parentId);
-          if (!arr) { arr = []; childrenOf.set(n.parentId, arr); }
-          arr.push(n.id);
+      // scopeId = id NomenclatureCategory. Обходим дерево категорий вниз,
+      // собираем все номенклатуры с любым из этих categoryId.
+      const [allCats, allNomen] = await Promise.all([
+        prisma.nomenclatureCategory.findMany({ select: { id: true, parentId: true } }),
+        prisma.nomenclature.findMany({ select: { id: true, categoryId: true } }),
+      ]);
+      const childCats = new Map<string, string[]>();
+      for (const c of allCats) {
+        if (c.parentId) {
+          let arr = childCats.get(c.parentId);
+          if (!arr) { arr = []; childCats.set(c.parentId, arr); }
+          arr.push(c.id);
         }
       }
-      const ids = new Set<string>();
+      const catIds = new Set<string>();
       const stack = [p.scopeId];
       while (stack.length) {
         const cur = stack.pop()!;
-        if (ids.has(cur)) continue;
-        ids.add(cur);
-        const ch = childrenOf.get(cur);
+        if (catIds.has(cur)) continue;
+        catIds.add(cur);
+        const ch = childCats.get(cur);
         if (ch) stack.push(...ch);
       }
+      const nomIds = allNomen.filter((n) => n.categoryId && catIds.has(n.categoryId)).map((n) => n.id);
       const agg = await prisma.realizaciaItem.aggregate({
         where: {
-          nomenclatureId: { in: Array.from(ids) },
+          nomenclatureId: { in: nomIds },
           realizacia: { posted: true, date: { gte: p.startDate, lte: p.endDate } },
         },
         _sum: { amount: true, quantity: true },

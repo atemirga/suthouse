@@ -92,7 +92,7 @@ const groups: NavGroup[] = [
     icon: IconBuilding,
     items: [
       { href: '/rnp', label: 'РНП — Заказы в работе', icon: IconRnp, hint: 'Заказы покупателей' },
-      { href: '/packers', label: 'Упаковщики', icon: IconUsers, hint: 'Отчёт по упаковщикам ABC', soon: true },
+      { href: '/packers', label: 'Упаковщики', icon: IconUsers, hint: 'Отчёт по упаковщикам ABC' },
       { href: '/anomalies', label: 'Аномалии', icon: IconWarning, hint: 'Ошибки данных, подозрительные документы' },
     ],
   },

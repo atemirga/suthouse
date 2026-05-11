@@ -7,7 +7,8 @@ export default async function PlansPage() {
   const [plans, employees, categories] = await Promise.all([
     prisma.salesPlan.findMany({ orderBy: { startDate: 'desc' } }),
     prisma.employee.findMany({ where: { isFolder: false }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
-    prisma.nomenclature.findMany({ where: { isFolder: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+    // Категории берём из NomenclatureCategory, а не из «папок» номенклатуры.
+    prisma.nomenclatureCategory.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
   ]);
 
   return (

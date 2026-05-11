@@ -53,11 +53,27 @@ model DdsArticle {
 }
 
 model Nomenclature {
+  id         String   @id
+  name       String
+  parentId   String?
+  isFolder   Boolean  @default(false)
+  // Catalog_КатегорииНоменклатуры — настоящие категории товаров
+  // (Курт, Иримшик, Май и т.д.). НЕ путать с parentId — это группа
+  // в дереве самой номенклатуры, она в этой 1С использует артикулы/коды.
+  categoryId String?
+  syncedAt   DateTime @default(now())
+
+  @@index([categoryId])
+}
+
+// Catalog_КатегорииНоменклатуры — управленческие категории товаров (Курт, Иримшик, Май, Майонез/Сухой и т.п.)
+model NomenclatureCategory {
   id       String   @id
   name     String
   parentId String?
-  isFolder Boolean  @default(false)
   syncedAt DateTime @default(now())
+
+  @@index([name])
 }
 
 model Kassa {
@@ -221,6 +237,10 @@ model OrderBuyer {
   kontragentName  String?
   responsibleId   String?
   responsibleName String?
+  // Курьер_Key — в этой конфигурации УНФ используется как «упаковщик/сборщик»
+  // (тот, кто фактически собирает заказ к выдаче). Используется в отчёте «Упаковщики ABC».
+  courierId       String?
+  courierName     String?
   totalAmount     Float     @default(0)
   paidAmount      Float     @default(0)
   status          String?
@@ -232,6 +252,7 @@ model OrderBuyer {
   @@index([date])
   @@index([status])
   @@index([kontragentId])
+  @@index([courierId])
 }
 
 // ═══════════════════════════════════════

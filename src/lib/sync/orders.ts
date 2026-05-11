@@ -11,6 +11,7 @@ interface OrderRow {
   Оплачено?: number; // могут быть и булево, и число — храним как число
   Контрагент_Key?: string;
   Ответственный_Key?: string;
+  Курьер_Key?: string; // в этой 1С используется как «упаковщик/сборщик»
   Статус?: string;
   ДатаОтгрузки?: string;
   Комментарий?: string;
@@ -44,6 +45,7 @@ export async function syncOrders(daysBack?: number) {
     if (!date) continue;
     const kontragentId = r.Контрагент_Key && !emptyKey(r.Контрагент_Key) ? r.Контрагент_Key : null;
     const responsibleId = r.Ответственный_Key && !emptyKey(r.Ответственный_Key) ? r.Ответственный_Key : null;
+    const courierId = r.Курьер_Key && !emptyKey(r.Курьер_Key) ? r.Курьер_Key : null;
 
     // В УНФ 1.6 KZ поля Статус нет, "статус" — это ВидОперации (например "ЗаказНаПродажу").
     const status = r.Статус || (r as any).ВидОперации || null;
@@ -58,6 +60,8 @@ export async function syncOrders(daysBack?: number) {
         kontragentName: kontragentId ? kMap.get(kontragentId) || `[${kontragentId.slice(0, 8)}]` : null,
         responsibleId,
         responsibleName: resolveResp(responsibleId),
+        courierId,
+        courierName: resolveResp(courierId),
         totalAmount: num(r.СуммаДокумента),
         paidAmount: num(r.СуммаОплачено) || num(r.Оплачено),
         status,
@@ -72,6 +76,8 @@ export async function syncOrders(daysBack?: number) {
         kontragentName: kontragentId ? kMap.get(kontragentId) || `[${kontragentId.slice(0, 8)}]` : null,
         responsibleId,
         responsibleName: resolveResp(responsibleId),
+        courierId,
+        courierName: resolveResp(courierId),
         totalAmount: num(r.СуммаДокумента),
         paidAmount: num(r.СуммаОплачено) || num(r.Оплачено),
         status,
