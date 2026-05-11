@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { resolvePeriod, type PeriodInput } from './period';
 import { buildOpiu } from './opiu';
+import { buildReceivables, AGING_BUCKETS, type BucketKey } from './receivables';
 
 export interface DashboardData {
   from: Date;
@@ -19,17 +20,24 @@ export interface DashboardData {
     cashIn: number;
     cashOut: number;
     netCashFlow: number;
-    avgCheck: number; // средний чек по реализациям
-    txCount: number;  // транзакций (реализаций)
+    avgCheck: number;
+    txCount: number;
     activeOrders: number;
+    // Новые
+    cashBalance: number;        // суммарный остаток денег
+    receivablesTotal: number;   // дебиторка всего
+    receivablesOverdue30: number; // просрочка 30+ дн
+    receivablesCount: number;   // число должников
+    prepayments: number;        // авансы получ.
+    discountsGiven: number;     // дано скидок за период
   };
   // Сравнение с предыдущим периодом (% delta)
   deltas: {
     revenue: number;
     netProfit: number;
     netCashFlow: number;
+    grossMargin: number;
   };
-  // Помесячные / понедельные / подневные ряды
   series: {
     period: string;
     revenue: number;
@@ -40,31 +48,39 @@ export interface DashboardData {
     cashIn: number;
     cashOut: number;
   }[];
-  // Структура расходов (для pie/bar)
   expenseBreakdown: { category: string; label: string; amount: number }[];
-  // Структура поступлений ДДС (по статьям)
   inflowBreakdown: { article: string; amount: number }[];
-  // Топ контрагентов по выручке
   topCustomers: { name: string; revenue: number; orders: number }[];
-  // Топ товаров по выручке
   topProducts: { name: string; revenue: number; quantity: number; margin: number }[];
+  // Новые блоки
+  receivablesAging: { key: BucketKey; label: string; color: string; amount: number }[];
+  topDebtors: { name: string; debt: number; oldestDays: number }[];
+  cashPositions: { name: string; type: 'kassa' | 'bank'; balance: number }[];
+  salesByManager: { name: string; revenue: number; orders: number; avgCheck: number }[];
 }
-
-const CATEGORY_LABELS: Record<string, string> = {
-  payroll: 'ФОТ', rent: 'Аренда', marketing: 'Маркетинг', admin: 'Администрат.',
-  logistics: 'Логистика', taxes: 'Налоги', interest: 'Проценты',
-  other_expense: 'Прочие расходы', var_expenses: 'Переменные', amortization: 'Амортизация',
-};
 
 export async function buildDashboard(input: PeriodInput): Promise<DashboardData> {
   const period = resolvePeriod(input);
 
-  // Подсчёт длительности периода для предыдущего сравнительного
   const periodMs = period.to.getTime() - period.from.getTime();
   const prevTo = new Date(period.from.getTime() - 1);
   const prevFrom = new Date(prevTo.getTime() - periodMs);
 
-  const [report, prevReport, dds, ddsPrev, realStats, orderStats, topCust, topProd, articles] = await Promise.all([
+  const [
+    report,
+    prevReport,
+    dds,
+    ddsPrev,
+    allDdsForBalance,
+    realStats,
+    activeOrders,
+    topCust,
+    topProd,
+    articles,
+    receivables,
+    discountAgg,
+    salesByMgr,
+  ] = await Promise.all([
     buildOpiu({ from: period.from, to: period.to, granularity: period.granularity }),
     buildOpiu({ from: prevFrom, to: prevTo, granularity: period.granularity }),
     prisma.ddsDocument.findMany({
@@ -74,6 +90,21 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     prisma.ddsDocument.findMany({
       where: { date: { gte: prevFrom, lte: prevTo }, docType: { not: 'PeremeschenieDC' } },
       select: { amount: true, direction: true },
+    }),
+    // Все ДДС до конца периода — для расчёта остатков касс/счетов
+    prisma.ddsDocument.findMany({
+      where: { date: { lte: period.to } },
+      select: {
+        amount: true,
+        direction: true,
+        docType: true,
+        kassaId: true,
+        kassaName: true,
+        kassaToId: true,
+        kassaToName: true,
+        accountId: true,
+        accountName: true,
+      },
     }),
     prisma.realizacia.aggregate({
       where: { date: { gte: period.from, lte: period.to }, posted: true },
@@ -97,9 +128,20 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
       take: 10,
     }),
     prisma.ddsArticle.findMany({ select: { id: true, ddsSection: true } }),
+    buildReceivables({ asOf: period.to, limit: 10 }),
+    prisma.realizaciaItem.aggregate({
+      where: { realizacia: { date: { gte: period.from, lte: period.to }, posted: true } },
+      _sum: { discount: true },
+    }),
+    prisma.realizacia.groupBy({
+      by: ['responsibleName'],
+      where: { date: { gte: period.from, lte: period.to }, posted: true, responsibleName: { not: null } },
+      _sum: { totalAmount: true },
+      _count: true,
+      orderBy: { _sum: { totalAmount: 'desc' } },
+      take: 8,
+    }),
   ]);
-
-  const sectionMap = new Map(articles.map((a) => [a.id, a.ddsSection || 'operating']));
 
   // Серии по периодам
   const seriesMap = new Map<string, any>();
@@ -131,7 +173,6 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
   }
   const series = Array.from(seriesMap.values());
 
-  // Прошлый период для cash
   let prevCashIn = 0, prevCashOut = 0;
   for (const d of ddsPrev) {
     if (d.direction === 'inflow') prevCashIn += d.amount;
@@ -156,7 +197,6 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     .filter(([_, __, v]) => v > 0)
     .map(([category, label, amount]) => ({ category, label, amount }));
 
-  // Структура поступлений ДДС
   const inflowMap = new Map<string, number>();
   for (const d of dds) {
     if (d.direction !== 'inflow') continue;
@@ -168,9 +208,60 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     .sort((a, b) => b.amount - a.amount)
     .slice(0, 10);
 
-  // Активные заказы (с долгом по отгрузке)
-  const activeOrders = await prisma.orderBuyer.count({
-    where: { posted: true },
+  // Остатки по кассам и банковским счетам.
+  // Учитываем перемещения: kassaId — откуда (− сумма), kassaToId — куда (+ сумма).
+  const cashByKassa = new Map<string, number>();
+  const cashByAccount = new Map<string, number>();
+  for (const d of allDdsForBalance) {
+    if (d.docType === 'PeremeschenieDC') {
+      if (d.kassaId && d.kassaName) {
+        cashByKassa.set(d.kassaName, (cashByKassa.get(d.kassaName) || 0) - d.amount);
+      }
+      if (d.kassaToId && d.kassaToName) {
+        cashByKassa.set(d.kassaToName, (cashByKassa.get(d.kassaToName) || 0) + d.amount);
+      }
+      continue;
+    }
+    const sign = d.direction === 'inflow' ? 1 : d.direction === 'outflow' ? -1 : 0;
+    if (sign === 0) continue;
+    if (d.kassaId && d.kassaName) {
+      cashByKassa.set(d.kassaName, (cashByKassa.get(d.kassaName) || 0) + sign * d.amount);
+    }
+    if (d.accountId && d.accountName) {
+      cashByAccount.set(d.accountName, (cashByAccount.get(d.accountName) || 0) + sign * d.amount);
+    }
+  }
+  const cashPositions = [
+    ...Array.from(cashByKassa.entries()).map(([name, balance]) => ({ name, type: 'kassa' as const, balance })),
+    ...Array.from(cashByAccount.entries()).map(([name, balance]) => ({ name, type: 'bank' as const, balance })),
+  ]
+    .filter((p) => Math.abs(p.balance) > 1)
+    .sort((a, b) => b.balance - a.balance);
+
+  const totalCashBalance = cashPositions.reduce((s, p) => s + p.balance, 0);
+
+  // Сводка дебиторки
+  const receivablesAging = AGING_BUCKETS.map((b) => ({
+    key: b.key,
+    label: b.label,
+    color: b.color,
+    amount: receivables.totals.buckets[b.key] || 0,
+  }));
+  const topDebtors = receivables.rows
+    .filter((r) => r.totalDebt > 0)
+    .slice(0, 10)
+    .map((r) => ({ name: r.kontragentName, debt: r.totalDebt, oldestDays: r.oldestDays }));
+
+  // Продажи по менеджерам
+  const salesByManager = salesByMgr.map((m) => {
+    const revenue = m._sum.totalAmount || 0;
+    const orders = m._count;
+    return {
+      name: m.responsibleName || '—',
+      revenue,
+      orders,
+      avgCheck: orders > 0 ? revenue / orders : 0,
+    };
   });
 
   const totalRevenue = realStats._sum.totalAmount || 0;
@@ -201,11 +292,18 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
       avgCheck,
       txCount,
       activeOrders,
+      cashBalance: totalCashBalance,
+      receivablesTotal: receivables.totals.debt,
+      receivablesOverdue30: receivables.totals.overdue30Plus,
+      receivablesCount: receivables.totals.debtorCount,
+      prepayments: receivables.totals.prepayments,
+      discountsGiven: discountAgg._sum.discount || 0,
     },
     deltas: {
       revenue: delta(report.grandTotal.revenue, prevReport.grandTotal.revenue),
       netProfit: delta(report.grandTotal.netProfit, prevReport.grandTotal.netProfit),
       netCashFlow: delta(totalCashIn - totalCashOut, prevCashIn - prevCashOut),
+      grossMargin: delta(report.grandTotal.grossMargin, prevReport.grandTotal.grossMargin),
     },
     series,
     expenseBreakdown,
@@ -226,5 +324,9 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
         margin,
       };
     }),
+    receivablesAging,
+    topDebtors,
+    cashPositions,
+    salesByManager,
   };
 }
