@@ -41,8 +41,8 @@ const groups: NavGroup[] = [
     icon: IconWallet,
     items: [
       { href: '/dds', label: 'ДДС-Отчёт', icon: IconDds, hint: 'Операционная / Инвестиционная / Финансовая' },
-      { href: '/dds/by-kassa', label: 'ДДС по кассам', icon: IconCash, hint: 'Остатки и обороты по каждой кассе', soon: true },
-      { href: '/payments', label: 'Платежи', icon: IconCoins, hint: 'Реестр банковских и кассовых платежей', soon: true },
+      { href: '/dds/by-kassa', label: 'ДДС по кассам', icon: IconCash, hint: 'Остатки и обороты по каждой кассе' },
+      { href: '/payments', label: 'Платежи', icon: IconCoins, hint: 'Реестр банковских и кассовых платежей' },
     ],
   },
   {
@@ -51,8 +51,8 @@ const groups: NavGroup[] = [
     icon: IconOpiu,
     items: [
       { href: '/opiu', label: 'ОПиУ (P&L)', icon: IconOpiu, hint: 'Прибыли и убытки' },
-      { href: '/expenses', label: 'Структура расходов', icon: IconPie, hint: 'Расходы по категориям', soon: true },
-      { href: '/discounts', label: 'Скидки', icon: IconTrend, hint: 'Предоставленные скидки', soon: true },
+      { href: '/expenses', label: 'Структура расходов', icon: IconPie, hint: 'Расходы по категориям' },
+      { href: '/discounts', label: 'Скидки', icon: IconTrend, hint: 'Предоставленные скидки' },
     ],
   },
   {
@@ -60,11 +60,11 @@ const groups: NavGroup[] = [
     label: 'Продажи',
     icon: IconCart,
     items: [
-      { href: '/sales/abc', label: 'ABC-анализ', icon: IconCart, hint: 'A/B/C по выручке и марже', soon: true },
-      { href: '/sales/by-category', label: 'По категориям', icon: IconCart, hint: 'Категории номенклатуры', soon: true },
-      { href: '/sales/by-sku', label: 'По SKU и менеджерам', icon: IconCart, hint: 'Позиции × менеджер', soon: true },
+      { href: '/sales/abc', label: 'ABC-анализ', icon: IconCart, hint: 'A/B/C по выручке и марже' },
+      { href: '/sales/by-category', label: 'По категориям', icon: IconCart, hint: 'Категории номенклатуры' },
+      { href: '/sales/by-sku', label: 'По SKU и менеджерам', icon: IconCart, hint: 'Позиции × менеджер' },
       { href: '/sales/funnel', label: 'Воронка продаж', icon: IconUsers, hint: 'Лиды → покупатели → заказы', soon: true },
-      { href: '/sales/by-manager', label: 'Заказы менеджеров', icon: IconUsers, hint: 'Кто что выполнил', soon: true },
+      { href: '/sales/by-manager', label: 'Заказы менеджеров', icon: IconUsers, hint: 'Кто что выполнил' },
       { href: '/sales/plans', label: 'Планы и план-факт', icon: IconTrend, hint: 'План продаж vs факт', soon: true },
     ],
   },
