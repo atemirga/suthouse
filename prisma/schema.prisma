@@ -15,14 +15,24 @@ datasource db {
 // ═══════════════════════════════════════
 
 model Kontragent {
-  id          String   @id // Ref_Key
-  name        String
-  parentId    String?
-  responsible String?
-  isFolder    Boolean  @default(false)
-  syncedAt    DateTime @default(now())
+  id                 String   @id // Ref_Key
+  name               String
+  parentId           String?
+  responsible        String?
+  isFolder           Boolean  @default(false)
+  // Источник привлечения покупателя (Instagram, OLX, Tik-tok и т.п.)
+  // Из Catalog_ИсточникиПривлеченияПокупателей в УНФ.
+  attractionSourceId String?
+  syncedAt           DateTime @default(now())
 
   @@index([name])
+  @@index([attractionSourceId])
+}
+
+model AttractionSource {
+  id       String   @id // Ref_Key из Catalog_ИсточникиПривлеченияПокупателей
+  name     String
+  syncedAt DateTime @default(now())
 }
 
 model DdsArticle {
@@ -327,6 +337,46 @@ model OpeningBalance {
 
   @@unique([kind, refId])
   @@index([kind])
+}
+
+// Остатки товаров на складах — снимок из AccumulationRegister_ЗапасыНаСкладах
+// на конкретную дату. Перезаписывается при каждом sync.
+model InventoryBalance {
+  id               String   @id @default(cuid())
+  asOfDate         DateTime
+  warehouseId      String
+  warehouseName    String?
+  nomenclatureId   String
+  nomenclatureName String?
+  quantity         Float
+  syncedAt         DateTime @default(now())
+
+  @@index([warehouseId])
+  @@index([nomenclatureId])
+  @@index([asOfDate])
+}
+
+// Планы продаж — управленческая сущность, которую вводят прямо в нашем приложении
+// (в УНФ KZ 1.6 OData документа «План продаж» нет).
+// scope: 'category' | 'sku' | 'manager' | 'total'
+// scopeId: id номенклатуры/категории/менеджера или null для total
+model SalesPlan {
+  id            String   @id @default(cuid())
+  scenarioName  String   @default("Основной")
+  startDate     DateTime
+  endDate       DateTime
+  scope         String   @default("category") // category | sku | manager | total
+  scopeId       String?
+  scopeName     String?
+  amountPlan    Float    @default(0)
+  quantityPlan  Float    @default(0)
+  responsible   String?
+  comment       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([startDate, endDate])
+  @@index([scope, scopeId])
 }
 
 model SyncLog {

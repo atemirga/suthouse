@@ -63,9 +63,10 @@ const groups: NavGroup[] = [
       { href: '/sales/abc', label: 'ABC-анализ', icon: IconCart, hint: 'A/B/C по выручке и марже' },
       { href: '/sales/by-category', label: 'По категориям', icon: IconCart, hint: 'Категории номенклатуры' },
       { href: '/sales/by-sku', label: 'По SKU и менеджерам', icon: IconCart, hint: 'Позиции × менеджер' },
-      { href: '/sales/funnel', label: 'Воронка продаж', icon: IconUsers, hint: 'Лиды → покупатели → заказы', soon: true },
+      { href: '/sales/funnel', label: 'Воронка продаж', icon: IconUsers, hint: 'По источникам привлечения' },
       { href: '/sales/by-manager', label: 'Заказы менеджеров', icon: IconUsers, hint: 'Кто что выполнил' },
-      { href: '/sales/plans', label: 'Планы и план-факт', icon: IconTrend, hint: 'План продаж vs факт', soon: true },
+      { href: '/sales/plans', label: 'Планы продаж', icon: IconTrend, hint: 'Установка целевых планов' },
+      { href: '/sales/plan-fact', label: 'План-факт анализ', icon: IconTrend, hint: 'Сравнение план vs факт' },
     ],
   },
   {
@@ -73,7 +74,7 @@ const groups: NavGroup[] = [
     label: 'Запасы',
     icon: IconBox,
     items: [
-      { href: '/inventory/balances', label: 'Остатки товаров', icon: IconBox, hint: 'На дату, по складам', soon: true },
+      { href: '/inventory/balances', label: 'Остатки товаров', icon: IconBox, hint: 'На дату, по складам' },
     ],
   },
   {
@@ -82,7 +83,7 @@ const groups: NavGroup[] = [
     icon: IconCoins,
     items: [
       { href: '/receivables', label: 'Дебиторка', icon: IconCoins, hint: 'Долги с разбивкой по возрасту (AR Aging)' },
-      { href: '/payables', label: 'Кредиторка', icon: IconCoins, hint: 'Наши долги поставщикам', soon: true },
+      { href: '/payables', label: 'Кредиторка', icon: IconCoins, hint: 'Наши долги поставщикам' },
     ],
   },
   {

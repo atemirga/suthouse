@@ -75,10 +75,27 @@ interface CatRow {
   IsFolder?: boolean;
 }
 
+export async function syncAttractionSources() {
+  const rows = await fetchAllOData<CatRow>('Catalog_ИсточникиПривлеченияПокупателей', {
+    select: 'Ref_Key,Description',
+  });
+  let count = 0;
+  for (const r of rows) {
+    if (emptyKey(r.Ref_Key)) continue;
+    await prisma.attractionSource.upsert({
+      where: { id: r.Ref_Key },
+      create: { id: r.Ref_Key, name: normalizeName(r.Description) || '[Источник]' },
+      update: { name: normalizeName(r.Description) || '[Источник]', syncedAt: new Date() },
+    });
+    count++;
+  }
+  return count;
+}
+
 export async function syncKontragenty() {
-  const rows = await fetchAllOData<CatRow & { Ответственный_Key?: string }>(
+  const rows = await fetchAllOData<CatRow & { Ответственный_Key?: string; ИсточникПривлеченияПокупателя_Key?: string }>(
     'Catalog_Контрагенты',
-    { select: 'Ref_Key,Description,Parent_Key,IsFolder,Ответственный_Key' },
+    { select: 'Ref_Key,Description,Parent_Key,IsFolder,Ответственный_Key,ИсточникПривлеченияПокупателя_Key' },
   );
   // Резолвим ответственного через Catalog_Пользователи (загружено отдельно)
   const users = await prisma.user1C.findMany({ select: { id: true, name: true } });
@@ -87,6 +104,9 @@ export async function syncKontragenty() {
   let count = 0;
   for (const r of rows) {
     if (emptyKey(r.Ref_Key)) continue;
+    const attractionSourceId = !emptyKey(r.ИсточникПривлеченияПокупателя_Key)
+      ? r.ИсточникПривлеченияПокупателя_Key!
+      : null;
     await prisma.kontragent.upsert({
       where: { id: r.Ref_Key },
       create: {
@@ -95,11 +115,13 @@ export async function syncKontragenty() {
         parentId: emptyKey(r.Parent_Key) ? null : r.Parent_Key,
         isFolder: !!r.IsFolder,
         responsible: emptyKey(r.Ответственный_Key) ? null : userMap.get(r.Ответственный_Key!) || null,
+        attractionSourceId,
       },
       update: {
         name: normalizeName(r.Description) || '[без названия]',
         parentId: emptyKey(r.Parent_Key) ? null : r.Parent_Key,
         isFolder: !!r.IsFolder,
+        attractionSourceId,
         responsible: emptyKey(r.Ответственный_Key) ? null : userMap.get(r.Ответственный_Key!) || null,
         syncedAt: new Date(),
       },
@@ -255,8 +277,12 @@ export async function syncEmployees() {
 }
 
 export async function syncAllCatalogs() {
-  // Пользователи и сотрудники нужны до документов (Ответственный_Key, Менеджер_Key)
-  const [users, employees] = await Promise.all([syncUsers(), syncEmployees()]);
+  // Пользователи, сотрудники и источники привлечения нужны до контрагентов и документов.
+  const [users, employees, sources] = await Promise.all([
+    syncUsers(),
+    syncEmployees(),
+    syncAttractionSources(),
+  ]);
   const [kontragenty, articles, nom, kassy, banks] = await Promise.all([
     syncKontragenty(),
     syncDdsArticles(),
@@ -264,5 +290,5 @@ export async function syncAllCatalogs() {
     syncKassy(),
     syncBankAccounts(),
   ]);
-  return { users, employees, kontragenty, articles, nomenclature: nom, kassy, banks };
+  return { users, employees, sources, kontragenty, articles, nomenclature: nom, kassy, banks };
 }
