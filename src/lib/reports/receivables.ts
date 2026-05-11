@@ -71,7 +71,7 @@ export async function buildReceivables(opts: BuildOpts = {}): Promise<Receivable
   // Берём только проведённые документы. Возвраты от покупателя в zakupki не трогаем —
   // у них direction нет, это другой контур. AR строим только на основании реализаций
   // и ДДС-поступлений.
-  const [realizations, payments] = await Promise.all([
+  const [realizations, payments, openings] = await Promise.all([
     prisma.realizacia.findMany({
       where: { posted: true, kontragentId: { not: null }, date: { lte: asOf } },
       select: { kontragentId: true, kontragentName: true, totalAmount: true, date: true, number: true },
@@ -87,12 +87,32 @@ export async function buildReceivables(opts: BuildOpts = {}): Promise<Receivable
       select: { kontragentId: true, amount: true, date: true },
       orderBy: { date: 'asc' },
     }),
+    // Opening balance из регистра 1С на дату начала окна синка.
+    // Нужно чтобы дебиторка из старых отгрузок не терялась.
+    prisma.openingBalance.findMany({
+      where: { kind: 'ar' },
+      select: { refId: true, refName: true, amount: true, asOfDate: true },
+    }),
   ]);
 
   // Группируем
   type Shipment = { date: Date; amount: number; remaining: number; number: string };
   const shipMap = new Map<string, Shipment[]>();
   const nameMap = new Map<string, string>();
+
+  // Opening balances идут в начало списка отгрузок как самая ранняя «отгрузка»
+  // на дату opening. Отрицательные opening (= аванс получ.) добавятся как
+  // дополнительные платежи в payMap ниже.
+  const openingDate = openings[0]?.asOfDate || new Date(asOf.getTime() - 365 * 86400000);
+  for (const o of openings) {
+    if (o.amount > 0) {
+      nameMap.set(o.refId, o.refName || '—');
+      let arr = shipMap.get(o.refId);
+      if (!arr) { arr = []; shipMap.set(o.refId, arr); }
+      arr.push({ date: openingDate, amount: o.amount, remaining: o.amount, number: 'opening' });
+    }
+  }
+
   for (const r of realizations) {
     if (!r.kontragentId) continue;
     nameMap.set(r.kontragentId, r.kontragentName || '—');
@@ -100,8 +120,17 @@ export async function buildReceivables(opts: BuildOpts = {}): Promise<Receivable
     if (!arr) { arr = []; shipMap.set(r.kontragentId, arr); }
     arr.push({ date: r.date, amount: r.totalAmount, remaining: r.totalAmount, number: r.number });
   }
+  // Сортируем отгрузки внутри каждого контрагента по дате — opening попадёт в начало.
+  for (const arr of shipMap.values()) arr.sort((a, b) => a.date.getTime() - b.date.getTime());
 
   const payMap = new Map<string, number>();
+  // Отрицательные opening = авансы покупателей на момент opening — это «уже полученные» платежи.
+  for (const o of openings) {
+    if (o.amount < 0) {
+      payMap.set(o.refId, (payMap.get(o.refId) || 0) - o.amount);
+      nameMap.set(o.refId, o.refName || nameMap.get(o.refId) || '—');
+    }
+  }
   for (const p of payments) {
     if (!p.kontragentId) continue;
     payMap.set(p.kontragentId, (payMap.get(p.kontragentId) || 0) + p.amount);

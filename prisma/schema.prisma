@@ -68,6 +68,19 @@ model User1C {
   syncedAt DateTime @default(now())
 }
 
+// Catalog_Сотрудники — реальные менеджеры/сотрудники компании (Жанис, Акат, Нурхуда и т.п.).
+// Это не то же самое, что Catalog_Пользователи (системные пользователи 1С).
+// Поле «Ответственный» в Заказе и Реализации ссылается СЮДА, а не на User1C.
+model Employee {
+  id       String   @id
+  name     String
+  parentId String?
+  isFolder Boolean  @default(false)
+  syncedAt DateTime @default(now())
+
+  @@index([name])
+}
+
 // ═══════════════════════════════════════
 // ДДС: 4 типа документов + перемещения
 // ═══════════════════════════════════════
@@ -294,6 +307,26 @@ model ManualAdjustment {
   createdAt DateTime @default(now())
 
   @@index([month])
+}
+
+// Сальдо на дату начала синка из регистров 1С — нужно чтобы остаток денег и
+// дебиторка/кредиторка были корректны (данные ДО окна синка не доступны иначе).
+//
+// kind: 'cash' (по кассам/счетам) | 'ar' (с покупателями) | 'ap' (с поставщиками)
+// refId: для cash = id кассы/счёта; для ar/ap = id контрагента
+// amount: + = актив (нам должны / у нас деньги); − = пассив (мы должны)
+model OpeningBalance {
+  id       String   @id @default(cuid())
+  asOfDate DateTime
+  kind     String
+  refId    String
+  refName  String?
+  refType  String? // 'kassa' | 'bank' (только для cash)
+  amount   Float
+  syncedAt DateTime @default(now())
+
+  @@unique([kind, refId])
+  @@index([kind])
 }
 
 model SyncLog {

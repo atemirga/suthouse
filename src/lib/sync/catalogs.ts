@@ -223,9 +223,40 @@ export async function syncUsers() {
   return count;
 }
 
+// Catalog_Сотрудники — реальные менеджеры (Жанис, Акат, Нурхуда…), на которых
+// ссылается «Ответственный» в Заказах и Реализациях. НЕ путать с Catalog_Пользователи
+// (Админ, Salamat, SSL — системные пользователи).
+export async function syncEmployees() {
+  const rows = await fetchAllOData<CatRow>('Catalog_Сотрудники', {
+    select: 'Ref_Key,Description,Parent_Key,IsFolder',
+  });
+  let count = 0;
+  for (const r of rows) {
+    if (emptyKey(r.Ref_Key)) continue;
+    const parentId = r.Parent_Key && !emptyKey(r.Parent_Key) ? r.Parent_Key : null;
+    await prisma.employee.upsert({
+      where: { id: r.Ref_Key },
+      create: {
+        id: r.Ref_Key,
+        name: normalizeName(r.Description) || '[Сотрудник]',
+        parentId,
+        isFolder: !!r.IsFolder,
+      },
+      update: {
+        name: normalizeName(r.Description) || '[Сотрудник]',
+        parentId,
+        isFolder: !!r.IsFolder,
+        syncedAt: new Date(),
+      },
+    });
+    count++;
+  }
+  return count;
+}
+
 export async function syncAllCatalogs() {
-  // Пользователи нужны до контрагентов (Ответственный_Key)
-  const users = await syncUsers();
+  // Пользователи и сотрудники нужны до документов (Ответственный_Key, Менеджер_Key)
+  const [users, employees] = await Promise.all([syncUsers(), syncEmployees()]);
   const [kontragenty, articles, nom, kassy, banks] = await Promise.all([
     syncKontragenty(),
     syncDdsArticles(),
@@ -233,5 +264,5 @@ export async function syncAllCatalogs() {
     syncKassy(),
     syncBankAccounts(),
   ]);
-  return { users, kontragenty, articles, nomenclature: nom, kassy, banks };
+  return { users, employees, kontragenty, articles, nomenclature: nom, kassy, banks };
 }

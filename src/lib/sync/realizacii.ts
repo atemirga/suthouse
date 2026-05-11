@@ -45,15 +45,19 @@ export async function syncRealizacii(daysBack?: number) {
   const filter = combineFilters(POSTED_FILTER, dateFilter('Date', 'ge', since));
   const rows = await fetchRealizacii(filter);
 
-  const [konts, noms, users, costMap] = await Promise.all([
+  const [konts, noms, users, employees, costMap] = await Promise.all([
     prisma.kontragent.findMany({ select: { id: true, name: true } }),
     prisma.nomenclature.findMany({ select: { id: true, name: true } }),
     prisma.user1C.findMany({ select: { id: true, name: true } }),
+    prisma.employee.findMany({ select: { id: true, name: true } }),
     buildCostPriceMap(),
   ]);
   const kMap = new Map(konts.map((k) => [k.id, k.name]));
   const nMap = new Map(noms.map((n) => [n.id, n.name]));
+  // «Ответственный» в Реализации ссылается на Catalog_Сотрудники.
   const uMap = new Map(users.map((u) => [u.id, u.name]));
+  const eMap = new Map(employees.map((e) => [e.id, e.name]));
+  const resolveResp = (id: string | null) => (id ? (eMap.get(id) || uMap.get(id) || null) : null);
 
   let count = 0;
   for (const r of rows) {
@@ -97,7 +101,7 @@ export async function syncRealizacii(daysBack?: number) {
           kontragentId,
           kontragentName: kontragentId ? kMap.get(kontragentId) || `[${kontragentId.slice(0, 8)}]` : null,
           responsibleId,
-          responsibleName: responsibleId ? uMap.get(responsibleId) || null : null,
+          responsibleName: resolveResp(responsibleId),
           operationType: r.ВидОперации || null,
           totalAmount: num(r.СуммаДокумента),
           totalCost,
@@ -111,7 +115,7 @@ export async function syncRealizacii(daysBack?: number) {
           kontragentId,
           kontragentName: kontragentId ? kMap.get(kontragentId) || `[${kontragentId.slice(0, 8)}]` : null,
           responsibleId,
-          responsibleName: responsibleId ? uMap.get(responsibleId) || null : null,
+          responsibleName: resolveResp(responsibleId),
           operationType: r.ВидОперации || null,
           totalAmount: num(r.СуммаДокумента),
           totalCost,

@@ -83,13 +83,16 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
   ] = await Promise.all([
     buildOpiu({ from: period.from, to: period.to, granularity: period.granularity }),
     buildOpiu({ from: prevFrom, to: prevTo, granularity: period.granularity }),
+    // Включаем перемещения: 1С "ДДС-Касса" учитывает межкассовые переводы дважды
+    // (одна сторона как поступление, другая как расход), и пользователь хочет
+    // соответствия 1С. NET остаётся прежним, gross совпадает с экраном 1С.
     prisma.ddsDocument.findMany({
-      where: { date: { gte: period.from, lte: period.to }, docType: { not: 'PeremeschenieDC' } },
-      select: { date: true, amount: true, direction: true, articleId: true, articleName: true },
+      where: { date: { gte: period.from, lte: period.to } },
+      select: { date: true, amount: true, direction: true, docType: true, articleId: true, articleName: true },
     }),
     prisma.ddsDocument.findMany({
-      where: { date: { gte: prevFrom, lte: prevTo }, docType: { not: 'PeremeschenieDC' } },
-      select: { amount: true, direction: true },
+      where: { date: { gte: prevFrom, lte: prevTo } },
+      select: { amount: true, direction: true, docType: true },
     }),
     // Все ДДС до конца периода — для расчёта остатков касс/счетов
     prisma.ddsDocument.findMany({
@@ -163,7 +166,13 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     const col = period.bucketOf(d.date);
     const row = seriesMap.get(col);
     if (!row) continue;
-    if (d.direction === 'inflow') {
+    if (d.docType === 'PeremeschenieDC') {
+      // Перемещение учитываем и как inflow, и как outflow (как в 1С ДДС-Касса).
+      row.cashIn += d.amount;
+      row.cashOut += d.amount;
+      totalCashIn += d.amount;
+      totalCashOut += d.amount;
+    } else if (d.direction === 'inflow') {
       row.cashIn += d.amount;
       totalCashIn += d.amount;
     } else if (d.direction === 'outflow') {
@@ -175,7 +184,8 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
 
   let prevCashIn = 0, prevCashOut = 0;
   for (const d of ddsPrev) {
-    if (d.direction === 'inflow') prevCashIn += d.amount;
+    if (d.docType === 'PeremeschenieDC') { prevCashIn += d.amount; prevCashOut += d.amount; }
+    else if (d.direction === 'inflow') prevCashIn += d.amount;
     else if (d.direction === 'outflow') prevCashOut += d.amount;
   }
 
@@ -197,9 +207,10 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     .filter(([_, __, v]) => v > 0)
     .map(([category, label, amount]) => ({ category, label, amount }));
 
+  // Поступления по статьям ДДС: исключаем перемещения (они не имеют экономического смысла).
   const inflowMap = new Map<string, number>();
   for (const d of dds) {
-    if (d.direction !== 'inflow') continue;
+    if (d.direction !== 'inflow' || d.docType === 'PeremeschenieDC') continue;
     const key = d.articleName || '[без статьи]';
     inflowMap.set(key, (inflowMap.get(key) || 0) + d.amount);
   }
@@ -208,33 +219,44 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     .sort((a, b) => b.amount - a.amount)
     .slice(0, 10);
 
-  // Остатки по кассам и банковским счетам.
+  // Остатки по кассам и банковским счетам = opening balance + изменения с opening date.
   // Учитываем перемещения: kassaId — откуда (− сумма), kassaToId — куда (+ сумма).
-  const cashByKassa = new Map<string, number>();
-  const cashByAccount = new Map<string, number>();
+  const openingCash = await prisma.openingBalance.findMany({
+    where: { kind: 'cash' },
+    select: { refId: true, refName: true, refType: true, amount: true },
+  });
+  const cashByKey = new Map<string, { name: string; type: 'kassa' | 'bank'; balance: number }>();
+  for (const o of openingCash) {
+    cashByKey.set(o.refId, {
+      name: o.refName || '—',
+      type: (o.refType as 'kassa' | 'bank') || 'kassa',
+      balance: o.amount,
+    });
+  }
+  function bumpByName(name: string | null, kassaId: string | null, accountId: string | null, amount: number, isBank: boolean) {
+    const id = accountId || kassaId;
+    if (!id || !name) return;
+    let v = cashByKey.get(id);
+    if (!v) {
+      v = { name, type: isBank ? 'bank' : 'kassa', balance: 0 };
+      cashByKey.set(id, v);
+    } else if (!v.name || v.name === '—') {
+      v.name = name;
+    }
+    v.balance += amount;
+  }
   for (const d of allDdsForBalance) {
     if (d.docType === 'PeremeschenieDC') {
-      if (d.kassaId && d.kassaName) {
-        cashByKassa.set(d.kassaName, (cashByKassa.get(d.kassaName) || 0) - d.amount);
-      }
-      if (d.kassaToId && d.kassaToName) {
-        cashByKassa.set(d.kassaToName, (cashByKassa.get(d.kassaToName) || 0) + d.amount);
-      }
+      bumpByName(d.kassaName, d.kassaId, null, -d.amount, false);
+      bumpByName(d.kassaToName, d.kassaToId, null, d.amount, false);
       continue;
     }
     const sign = d.direction === 'inflow' ? 1 : d.direction === 'outflow' ? -1 : 0;
     if (sign === 0) continue;
-    if (d.kassaId && d.kassaName) {
-      cashByKassa.set(d.kassaName, (cashByKassa.get(d.kassaName) || 0) + sign * d.amount);
-    }
-    if (d.accountId && d.accountName) {
-      cashByAccount.set(d.accountName, (cashByAccount.get(d.accountName) || 0) + sign * d.amount);
-    }
+    if (d.kassaId) bumpByName(d.kassaName, d.kassaId, null, sign * d.amount, false);
+    if (d.accountId) bumpByName(d.accountName, null, d.accountId, sign * d.amount, true);
   }
-  const cashPositions = [
-    ...Array.from(cashByKassa.entries()).map(([name, balance]) => ({ name, type: 'kassa' as const, balance })),
-    ...Array.from(cashByAccount.entries()).map(([name, balance]) => ({ name, type: 'bank' as const, balance })),
-  ]
+  const cashPositions = Array.from(cashByKey.values())
     .filter((p) => Math.abs(p.balance) > 1)
     .sort((a, b) => b.balance - a.balance);
 

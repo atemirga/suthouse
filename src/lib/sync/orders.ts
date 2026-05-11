@@ -26,12 +26,16 @@ export async function syncOrders(daysBack?: number) {
   // от конфигурации (Оплачено, ДатаОтгрузки могут отсутствовать).
   const rows = await fetchAllOData<OrderRow>('Document_ЗаказПокупателя', { filter });
 
-  const [konts, users] = await Promise.all([
+  const [konts, users, employees] = await Promise.all([
     prisma.kontragent.findMany({ select: { id: true, name: true } }),
     prisma.user1C.findMany({ select: { id: true, name: true } }),
+    prisma.employee.findMany({ select: { id: true, name: true } }),
   ]);
   const kMap = new Map(konts.map((k) => [k.id, k.name]));
+  // «Ответственный» в Заказе ссылается на Catalog_Сотрудники (Employee), а не Catalog_Пользователи.
   const uMap = new Map(users.map((u) => [u.id, u.name]));
+  const eMap = new Map(employees.map((e) => [e.id, e.name]));
+  const resolveResp = (id: string | null) => (id ? (eMap.get(id) || uMap.get(id) || null) : null);
 
   let count = 0;
   for (const r of rows) {
@@ -53,7 +57,7 @@ export async function syncOrders(daysBack?: number) {
         kontragentId,
         kontragentName: kontragentId ? kMap.get(kontragentId) || `[${kontragentId.slice(0, 8)}]` : null,
         responsibleId,
-        responsibleName: responsibleId ? uMap.get(responsibleId) || null : null,
+        responsibleName: resolveResp(responsibleId),
         totalAmount: num(r.СуммаДокумента),
         paidAmount: num(r.СуммаОплачено) || num(r.Оплачено),
         status,
@@ -67,7 +71,7 @@ export async function syncOrders(daysBack?: number) {
         kontragentId,
         kontragentName: kontragentId ? kMap.get(kontragentId) || `[${kontragentId.slice(0, 8)}]` : null,
         responsibleId,
-        responsibleName: responsibleId ? uMap.get(responsibleId) || null : null,
+        responsibleName: resolveResp(responsibleId),
         totalAmount: num(r.СуммаДокумента),
         paidAmount: num(r.СуммаОплачено) || num(r.Оплачено),
         status,
