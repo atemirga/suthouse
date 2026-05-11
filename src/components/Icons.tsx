@@ -204,12 +204,6 @@ export const IconLink = (p: SVGProps<SVGSVGElement>) => (
   </svg>
 );
 
-export const IconStar = (p: SVGProps<SVGSVGElement>) => (
-  <svg {...base} {...p}>
-    <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
-  </svg>
-);
-
 export const IconWarning = (p: SVGProps<SVGSVGElement>) => (
   <svg {...base} {...p}>
     <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />

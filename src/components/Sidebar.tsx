@@ -10,12 +10,10 @@ import {
   IconSettings,
   IconLogout,
   IconWarning,
-  IconStar,
 } from './Icons';
 
 const navItems = [
   { href: '/', label: 'Дашборд', icon: IconDashboard, hint: 'Сводка KPI и графики' },
-  { href: '/favorites', label: 'Избранное', icon: IconStar, hint: 'Избранные отчёты из 1С:УНФ' },
   { href: '/opiu', label: 'ОПиУ', icon: IconOpiu, hint: 'Прибыли и убытки (P&L)' },
   { href: '/dds', label: 'ДДС', icon: IconDds, hint: 'Движение денежных средств' },
   { href: '/rnp', label: 'РНП', icon: IconRnp, hint: 'Заказы в работе' },
