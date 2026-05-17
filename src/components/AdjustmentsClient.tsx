@@ -13,16 +13,35 @@ interface Item {
   createdAt: Date;
 }
 
+// Категории отчёта ОПиУ + детализированные «sub-категории» от финансиста.
+// Sub-категории попадают в свою агрегированную категорию (например, loss_usushka
+// идёт в var_expenses) и отображаются отдельной строкой в отчёте.
 const CATEGORIES = [
+  // Общие категории ОПиУ
   'revenue', 'cogs', 'var_expenses', 'payroll', 'rent', 'marketing', 'admin',
   'logistics', 'taxes', 'interest', 'other_income', 'other_expense',
+  // Потери — детализация var_expenses
+  'loss_usushka', 'loss_untaq_synyq', 'loss_artyk_salu', 'loss_inventory_adj',
+  // ФОТ — детализация payroll по типу персонала (cash vs accrual)
+  'payroll_production', 'payroll_commercial', 'payroll_admin',
+  'bonus_production', 'bonus_commercial', 'bonus_admin',
 ];
 
 const CATEGORY_LABELS: Record<string, string> = {
   revenue: 'Выручка', cogs: 'Себестоимость', var_expenses: 'Перем. расходы',
-  payroll: 'ФОТ', rent: 'Аренда', marketing: 'Маркетинг', admin: 'Админ.',
+  payroll: 'ФОТ (общий)', rent: 'Аренда', marketing: 'Маркетинг', admin: 'Админ.',
   logistics: 'Логистика', taxes: 'Налоги', interest: 'Проценты',
   other_income: 'Прочие доходы', other_expense: 'Прочие расходы',
+  loss_usushka: '  └ Усушка',
+  loss_untaq_synyq: '  └ Ұнтақ/сынық',
+  loss_artyk_salu: '  └ Артык салу (доп.)',
+  loss_inventory_adj: '  └ Излишек/Недостача',
+  payroll_production: '  └ ЗП производственный',
+  payroll_commercial: '  └ ЗП коммерческий',
+  payroll_admin: '  └ ЗП административный',
+  bonus_production: '  └ Бонусы производство',
+  bonus_commercial: '  └ Бонусы коммерч.',
+  bonus_admin: '  └ Бонусы админ.',
 };
 
 function fmt(n: number) {

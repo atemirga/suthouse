@@ -49,9 +49,9 @@ export async function buildPlanFact(): Promise<PlanFactReport> {
 
     if (p.scope === 'total' || p.scope === 'manager') {
       const agg = await prisma.realizacia.aggregate({
-        where, _sum: { totalAmount: true }, _count: true,
+        where, _sum: { itemsAmount: true }, _count: true,
       });
-      amountFact = agg._sum.totalAmount || 0;
+      amountFact = agg._sum.itemsAmount || 0;
     } else if (p.scope === 'category' && p.scopeId) {
       // scopeId = id NomenclatureCategory. Обходим дерево категорий вниз,
       // собираем все номенклатуры с любым из этих categoryId.

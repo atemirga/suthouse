@@ -72,18 +72,21 @@ export async function syncRealizacii(daysBack?: number) {
     // syncZakupki + syncRealizacii пайплайн вызывает recomputeFifoCosts,
     // который перезаписывает эти поля настоящим FIFO по полной истории партий.
     let totalCost = 0;
+    let itemsAmount = 0;
     const items = (r.Запасы || []).map((it) => {
       const nomenclatureId = it.Номенклатура_Key && !emptyKey(it.Номенклатура_Key) ? it.Номенклатура_Key : null;
       const quantity = num(it.Количество);
+      const amount = num(it.Сумма);
       const costPrice = nomenclatureId ? costMap.get(nomenclatureId) || 0 : 0;
       const costAmount = costPrice * quantity;
       totalCost += costAmount;
+      itemsAmount += amount;
       return {
         nomenclatureId,
         nomenclatureName: nomenclatureId ? nMap.get(nomenclatureId) || `[${nomenclatureId.slice(0, 8)}]` : null,
         quantity,
         price: num(it.Цена),
-        amount: num(it.Сумма),
+        amount,
         discount: num(it.СуммаСкидкиНаценки),
         costPrice,
         costAmount,
@@ -104,6 +107,7 @@ export async function syncRealizacii(daysBack?: number) {
           responsibleName: resolveResp(responsibleId),
           operationType: r.ВидОперации || null,
           totalAmount: num(r.СуммаДокумента),
+          itemsAmount,
           totalCost,
           comment: normalizeName(r.Комментарий) || null,
           posted: r.Posted !== false,
@@ -118,6 +122,7 @@ export async function syncRealizacii(daysBack?: number) {
           responsibleName: resolveResp(responsibleId),
           operationType: r.ВидОперации || null,
           totalAmount: num(r.СуммаДокумента),
+          itemsAmount,
           totalCost,
           comment: normalizeName(r.Комментарий) || null,
           posted: r.Posted !== false,

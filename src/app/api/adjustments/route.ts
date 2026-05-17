@@ -21,6 +21,22 @@ export async function POST(req: NextRequest) {
   return NextResponse.json(a);
 }
 
+export async function PUT(req: NextRequest) {
+  const body = await req.json();
+  const { id, month, category, amount, comment } = body || {};
+  if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
+  const a = await prisma.manualAdjustment.update({
+    where: { id },
+    data: {
+      ...(month !== undefined ? { month } : {}),
+      ...(category !== undefined ? { category } : {}),
+      ...(amount !== undefined ? { amount: Number(amount) } : {}),
+      ...(comment !== undefined ? { comment: comment || null } : {}),
+    },
+  });
+  return NextResponse.json(a);
+}
+
 export async function DELETE(req: NextRequest) {
   const url = new URL(req.url);
   const id = url.searchParams.get('id');

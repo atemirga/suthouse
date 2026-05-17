@@ -1,5 +1,5 @@
 import { startOfMonth, endOfMonth, parseISO } from 'date-fns';
-import { buildPackers } from '@/lib/reports/packers';
+import { buildPackersReport } from '@/lib/reports/packers';
 import PeriodPicker from '@/components/PeriodPicker';
 import PackersClient from '@/components/PackersClient';
 
@@ -12,23 +12,24 @@ interface Props {
 export default async function PackersPage({ searchParams }: Props) {
   const from = searchParams.from ? parseISO(searchParams.from) : startOfMonth(new Date());
   const to = searchParams.to ? parseISO(searchParams.to) : endOfMonth(new Date());
-  const r = await buildPackers({ from, to });
+  const report = await buildPackersReport({ from, to });
 
   return (
-    <div className="space-y-5 max-w-[1600px] mx-auto">
+    <div className="space-y-5 max-w-[1400px] mx-auto">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Упаковщики ABC</h1>
+        <h1 className="text-2xl font-bold text-gray-900">Упаковщики</h1>
         <p className="text-sm text-gray-500 mt-0.5">
-          Сборщики/упаковщики заказов покупателей. В этой 1С это поле «Курьер» в заказе.
-          ABC — A: до 80% оборота, B: 80–95%, C: остальное.
+          Кто фактически собирал заказы. Источник — доп.реквизит «Упаковщик» в Заказе покупателя.
         </p>
       </div>
       <PeriodPicker showGranularity={false} />
-      <PackersClient initial={JSON.parse(JSON.stringify({
-        ...r,
-        from: r.from.toISOString(),
-        to: r.to.toISOString(),
-      }))} />
+      <PackersClient
+        initial={JSON.parse(JSON.stringify({
+          ...report,
+          from: report.from.toISOString(),
+          to: report.to.toISOString(),
+        }))}
+      />
     </div>
   );
 }

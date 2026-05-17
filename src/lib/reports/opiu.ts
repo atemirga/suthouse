@@ -59,6 +59,16 @@ export interface OpiuRow {
   drilldownCategory?: OpiuCategory; // для drill-down
 }
 
+export interface ColumnMeta {
+  // Статус закрытия месяца в 1С. Заполняется только для granularity='month'.
+  closed: boolean;
+  closedAt: Date | null;
+  // Проведён ли расчёт фактической себестоимости — критично для COGS.
+  // Если месяц не закрыт, COGS остаётся «скользящей» и может отличаться от
+  // фактической после закрытия.
+  hasActualCost: boolean;
+}
+
 export interface OpiuReport {
   from: Date;
   to: Date;
@@ -67,6 +77,7 @@ export interface OpiuReport {
   rows: OpiuRow[];
   totals: Record<string, OpiuTotals>; // по столбцам
   grandTotal: OpiuTotals;
+  columnsMeta: Record<string, ColumnMeta>;
 }
 
 interface CategoryBucket {
@@ -96,28 +107,113 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
   const period = resolvePeriod(input);
   const buckets: Record<string, CategoryBucket> = {};
 
-  // 1. Выручка и себестоимость — из реализаций
-  const realizacii = await prisma.realizacia.findMany({
-    where: { date: { gte: period.from, lte: period.to }, posted: true },
-    select: { date: true, totalAmount: true, totalCost: true },
-  });
+  // 1. Выручка и себестоимость — из реализаций.
+  // itemsAmount = только товарная часть (без услуг типа доставки), сходится
+  // с «В/С Выручка» 1С. totalAmount = СуммаДокумента (товары + услуги) —
+  // для дебиторки, не для выручки.
+  // Себестоимость: предпочитаем factCost (берётся из AccumulationRegister_Запасы_
+  // RecordType в 1С — единственный источник, который сходится с финансистом
+  // в закрытых месяцах). Если factCost не загружен — fallback на totalCost (FIFO).
+  // ВАЖНО: вычитаем возвраты от покупателей (Document_ПриходнаяНакладная
+  // с ВидОперации=ВозвратОтПокупателя, у нас Zakupka.isReturn=true).
+  // В 1С такие документы идут как «приходные», но по сути это снижение выручки.
+  const [realizacii, returns] = await Promise.all([
+    prisma.realizacia.findMany({
+      where: { date: { gte: period.from, lte: period.to }, posted: true },
+      select: { date: true, itemsAmount: true, totalCost: true, factCost: true },
+    }),
+    prisma.zakupka.findMany({
+      where: { date: { gte: period.from, lte: period.to }, posted: true, isReturn: true },
+      select: { date: true, totalAmount: true },
+    }),
+  ]);
   for (const r of realizacii) {
     const col = period.bucketOf(r.date);
-    addToBucket(buckets, 'revenue', col, r.totalAmount);
-    addToBucket(buckets, 'cogs', col, r.totalCost);
+    addToBucket(buckets, 'revenue', col, r.itemsAmount);
+    addToBucket(buckets, 'cogs', col, r.factCost ?? r.totalCost);
   }
+  // Возвраты вычитаем из выручки. Себестоимость возвращённого товара
+  // (totalCost) у нас в Zakupka не хранится — её можно учесть позже,
+  // если потребуется большая точность по cogs.
+  for (const r of returns) {
+    const col = period.bucketOf(r.date);
+    addToBucket(buckets, 'revenue', col, -r.totalAmount);
+  }
+
+  // 1b. Списания запасов — разносим по корреспонденции (план счетов 1С).
+  // У каждой корреспонденции отдельная строка в ОПиУ: Артык салу, Недостачи,
+  // Усушка, Прочие расходы и т.п. — то, что реально проставил финансист.
+  // Показываем ВСЕ корреспонденции, которые когда-либо встречались в
+  // списаниях (за всю историю). Если в текущем периоде по корреспонденции
+  // нет документов — строка остаётся с нулями. Менеджеры иногда классифицируют
+  // усушку как недостачу или прочие расходы, поэтому набор активных
+  // корреспонденций фиксированный и стабильный от отчёта к отчёту.
+  //
+  // Источник суммы:
+  //   - Корреспонденция «Недостачи» = инвентаризационный документ (десятки позиций).
+  //     1С при «Расчете фактической себестоимости» корректно пересчитывает их
+  //     по партиям → берём factCost из регистра 1С.
+  //   - Прочие корреспонденции («Прочие расходы», «Внутри компании» и т.п.) =
+  //     бытовые мини-списания (1-2 позиции, вводятся вручную). Регистр 1С
+  //     по таким иногда содержит разнесённые накладные / ошибки проведения
+  //     (например, для НФНФ-000028 «Мусор» 1С даёт 29 К ₸/кг для перца,
+  //     закупаемого по 1 005 ₸/кг). FIFO totalAmount = цена самого документа,
+  //     это и есть то, что использует финансист → берём totalAmount.
+  const [writeOffs, knownCorrs] = await Promise.all([
+    prisma.writeOff.findMany({
+      where: { date: { gte: period.from, lte: period.to }, posted: true },
+      select: { date: true, totalAmount: true, factCost: true, correspondenceId: true, correspondenceName: true },
+    }),
+    prisma.writeOff.findMany({
+      where: { posted: true },
+      distinct: ['correspondenceId'],
+      select: { correspondenceId: true, correspondenceName: true },
+    }),
+  ]);
+  for (const w of writeOffs) {
+    const col = period.bucketOf(w.date);
+    const corrId = w.correspondenceId || 'no-correspondence';
+    const key = `writeoff:${corrId}`;
+    const isInventoryAdjustment = w.correspondenceName === 'Недостачи';
+    const amount = isInventoryAdjustment ? (w.factCost ?? w.totalAmount) : w.totalAmount;
+    addToBucket(buckets, key, col, amount);
+    // Также суммируем в общий var_expenses (родитель), чтобы маржинальная
+    // прибыль/EBITDA корректно учитывали потери.
+    addToBucket(buckets, 'var_expenses', col, amount);
+  }
+  const writeOffLines: Array<{ key: string; label: string }> = knownCorrs.map((c) => ({
+    key: `writeoff:${c.correspondenceId || 'no-correspondence'}`,
+    label: c.correspondenceName || 'Без корреспонденции',
+  }));
+  writeOffLines.sort((a, b) => a.label.localeCompare(b.label, 'ru'));
 
   // 2. Расходы — из ДДС, сгруппированы по DdsArticle.opiuCategory
   // С учётом AccrualRule: размазываем по месяцам (только для granularity=month/week)
+  // Для ЗП-статей выплата может произойти позже месяца начисления (выдача
+  // 5 марта = за февраль, см. ПериодРегистрации в 1С). Чтобы попасть
+  // в правильный месяц ОПиУ, используем accrualPeriod если он задан.
+  // Расширяем окно выборки: cash-платежи начисления-за-период могут лежать
+  // и до period.from, и после period.to.
+  const ddsWindowFrom = addMonths(period.from, -2);
+  const ddsWindowTo = addMonths(period.to, 2);
   const dds = await prisma.ddsDocument.findMany({
     where: {
-      date: { gte: period.from, lte: period.to },
+      OR: [
+        { date: { gte: period.from, lte: period.to } },
+        { accrualPeriod: { gte: period.from, lte: period.to } },
+        // для ЗП-выплат — также берём те, что попадают по любому из двух полей в широкое окно
+        {
+          AND: [
+            { date: { gte: ddsWindowFrom, lte: ddsWindowTo } },
+            { accrualPeriod: { not: null } },
+          ],
+        },
+      ],
       direction: 'outflow',
-      // не учитываем перемещения
       docType: { not: 'PeremeschenieDC' },
       articleId: { not: null },
     },
-    select: { date: true, amount: true, articleId: true },
+    select: { date: true, accrualPeriod: true, amount: true, articleId: true },
   });
   // Так же приходные операции, помеченные как other_income
   const ddsIn = await prisma.ddsDocument.findMany({
@@ -166,7 +262,14 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
 
   for (const d of dds) {
     if (!d.articleId) continue;
-    addExpense(d.date, d.articleId, d.amount, 1);
+    // Для ЗП-выплат используем ПериодРегистрации (accrualPeriod) — месяц
+    // начисления, а не дату выплаты. Это accrual-метод для ФОТ, как у
+    // финансиста в Excel-ведомости.
+    const cat = artCat.get(d.articleId);
+    const effectiveDate = cat === 'payroll' && d.accrualPeriod ? d.accrualPeriod : d.date;
+    // Документы, у которых effectiveDate вне периода, пропускаем.
+    if (isBefore(effectiveDate, period.from) || isAfter(effectiveDate, period.to)) continue;
+    addExpense(effectiveDate, d.articleId, d.amount, 1);
   }
   for (const d of ddsIn) {
     if (!d.articleId) continue;
@@ -207,7 +310,36 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
     }
   }
 
-  // 4. Ручные корректировки
+  // 4. Ручные корректировки. Кроме «общих» категорий ОПиУ, поддерживаются
+  // детальные категории (loss_*, payroll_*, bonus_*) — они идут И в свою
+  // детальную корзину (для отдельной строки в отчёте), И в агрегатную
+  // категорию (для итогов EBITDA и т.п.).
+  const ADJ_PARENT: Record<string, string> = {
+    loss_usushka: 'var_expenses',
+    loss_untaq_synyq: 'var_expenses',
+    loss_artyk_salu: 'var_expenses',
+    loss_inventory_adj: 'var_expenses',
+    payroll_production: 'payroll',
+    payroll_commercial: 'payroll',
+    payroll_admin: 'payroll',
+    bonus_production: 'payroll',
+    bonus_commercial: 'payroll',
+    bonus_admin: 'payroll',
+  };
+  const ADJ_LABEL: Record<string, string> = {
+    loss_usushka: 'Усушка',
+    loss_untaq_synyq: 'Ұнтақ/сынық',
+    loss_artyk_salu: 'Артык салу (доп.)',
+    loss_inventory_adj: 'Излишек/Недостача',
+    payroll_production: 'ЗП производственный',
+    payroll_commercial: 'ЗП коммерческий',
+    payroll_admin: 'ЗП административный',
+    bonus_production: 'Бонусы производство',
+    bonus_commercial: 'Бонусы коммерч.',
+    bonus_admin: 'Бонусы админ.',
+  };
+  const adjustmentLines: Array<{ key: string; label: string; parent: string }> = [];
+  const adjustmentLineSeen = new Set<string>();
   const adjustments = await prisma.manualAdjustment.findMany();
   for (const adj of adjustments) {
     let d: Date;
@@ -218,8 +350,28 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
     }
     if (isBefore(d, period.from) || isAfter(d, period.to)) continue;
     const col = period.bucketOf(d);
-    addToBucket(buckets, adj.category, col, adj.amount);
+    const parent = ADJ_PARENT[adj.category];
+    if (parent) {
+      // Детальная корзина для отдельной строки + агрегатная для итогов.
+      // Convention: финансист вводит положительное число для расхода (например,
+      // «доп. усушка 1 000 000» = +1 000 000). Расходные категории в bucket
+      // хранятся положительными — вычитаются в EBITDA. В UI отображается с минусом.
+      addToBucket(buckets, `adj:${adj.category}`, col, adj.amount);
+      addToBucket(buckets, parent, col, adj.amount);
+      if (!adjustmentLineSeen.has(adj.category)) {
+        adjustmentLineSeen.add(adj.category);
+        adjustmentLines.push({
+          key: `adj:${adj.category}`,
+          label: ADJ_LABEL[adj.category] || adj.category,
+          parent,
+        });
+      }
+    } else {
+      // Общие категории — просто добавляем как раньше.
+      addToBucket(buckets, adj.category, col, adj.amount);
+    }
   }
+  adjustmentLines.sort((a, b) => a.label.localeCompare(b.label, 'ru'));
 
   // ═══ Сборка итогов ═══
   const totals: Record<string, OpiuTotals> = {};
@@ -304,9 +456,41 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
   addRow('gross_profit', 'Валовая прибыль', 0, 'sum', (t) => t.grossProfit);
   addRow('gross_margin', 'Валовая маржа, %', 1, 'pct', (t) => t.grossMargin, true);
   addRow('var_expenses', 'Переменные расходы', 0, 'value', (t) => -t.varExpenses, false, 'var_expenses');
+  // Детализация: списания из 1С по корреспонденции + ручные корректировки (loss_*).
+  for (const line of writeOffLines) {
+    const values: Record<string, number> = {};
+    let total = 0;
+    for (const col of period.columns) {
+      const val = buckets[line.key]?.byCol[col] || 0;
+      values[col] = -val;
+      total += -val;
+    }
+    rows.push({ id: line.key, label: `  ${line.label}`, level: 1, kind: 'value', values, total });
+  }
+  for (const line of adjustmentLines.filter((l) => l.parent === 'var_expenses')) {
+    const values: Record<string, number> = {};
+    let total = 0;
+    for (const col of period.columns) {
+      const val = buckets[line.key]?.byCol[col] || 0;
+      values[col] = -val;
+      total += -val;
+    }
+    rows.push({ id: line.key, label: `  ${line.label} (корр.)`, level: 1, kind: 'value', values, total });
+  }
   addRow('marginal_profit', 'Маржинальная прибыль', 0, 'sum', (t) => t.marginalProfit);
   addRow('opex_header', 'Постоянные операционные расходы', 0, 'header', () => 0);
   addRow('payroll', 'ФОТ (зарплата)', 1, 'value', (t) => -t.payroll, false, 'payroll');
+  // Детализация ФОТ по типу персонала (manual adjustments).
+  for (const line of adjustmentLines.filter((l) => l.parent === 'payroll')) {
+    const values: Record<string, number> = {};
+    let total = 0;
+    for (const col of period.columns) {
+      const val = buckets[line.key]?.byCol[col] || 0;
+      values[col] = -val;
+      total += -val;
+    }
+    rows.push({ id: line.key, label: `    ${line.label} (корр.)`, level: 2, kind: 'value', values, total });
+  }
   addRow('rent', 'Аренда', 1, 'value', (t) => -t.rent, false, 'rent');
   addRow('marketing', 'Маркетинг', 1, 'value', (t) => -t.marketing, false, 'marketing');
   addRow('logistics', 'Логистика', 1, 'value', (t) => -t.logistics, false, 'logistics');
@@ -325,6 +509,29 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
   addRow('net_profit', 'ЧИСТАЯ ПРИБЫЛЬ', 0, 'sum', (t) => t.netProfit);
   addRow('net_margin', 'Рентабельность по чистой прибыли, %', 1, 'pct', (t) => t.netMargin, true);
 
+  // Статус закрытия месяцев в 1С. Открытые месяцы могут иметь «скользящую»
+  // себестоимость и расходиться с финансистом — UI должен пометить их.
+  const columnsMeta: Record<string, ColumnMeta> = {};
+  if (period.granularity === 'month') {
+    const closes = await prisma.monthClose.findMany({
+      where: { yearMonth: { in: period.columns } },
+      select: { yearMonth: true, closedAt: true, hasActualCost: true },
+    });
+    const closeMap = new Map(closes.map((c) => [c.yearMonth, c]));
+    for (const col of period.columns) {
+      const c = closeMap.get(col);
+      columnsMeta[col] = {
+        closed: !!c,
+        closedAt: c?.closedAt || null,
+        hasActualCost: c?.hasActualCost || false,
+      };
+    }
+  } else {
+    for (const col of period.columns) {
+      columnsMeta[col] = { closed: false, closedAt: null, hasActualCost: false };
+    }
+  }
+
   return {
     from: period.from,
     to: period.to,
@@ -333,6 +540,7 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
     rows,
     totals,
     grandTotal: grand,
+    columnsMeta,
   };
 }
 
@@ -345,7 +553,7 @@ export async function drillOpiu(category: OpiuCategory, from: Date, to: Date) {
       take: 500,
       select: {
         id: true, date: true, number: true, kontragentName: true,
-        totalAmount: true, totalCost: true, comment: true,
+        itemsAmount: true, totalCost: true, factCost: true, comment: true,
       },
     });
     return realizacii.map((r) => ({
@@ -353,7 +561,7 @@ export async function drillOpiu(category: OpiuCategory, from: Date, to: Date) {
       date: r.date,
       number: r.number,
       counterparty: r.kontragentName,
-      amount: category === 'revenue' ? r.totalAmount : r.totalCost,
+      amount: category === 'revenue' ? r.itemsAmount : (r.factCost ?? r.totalCost),
       comment: r.comment,
     }));
   }

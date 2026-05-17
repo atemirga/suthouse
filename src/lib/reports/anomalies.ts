@@ -353,7 +353,7 @@ export async function buildAnomalies(): Promise<AnomaliesReport> {
   cats.push({
     key: 'ordersWithoutStatus',
     title: 'Заказы без статуса',
-    description: 'Заказы покупателей не имеют поля «Статус». В РНП такие отображаются по ВидОперации, но это менее точно. Проверьте, что в 1С статусы заполняются.',
+    description: 'Заказы покупателей не имеют поля «Статус». Проверьте, что в 1С статусы заполняются.',
     severity: 'low',
     count: ordersNoStatusCount,
     totalAmount: ordersNoStatus.reduce((s, o) => s + o.totalAmount, 0),

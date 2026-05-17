@@ -22,6 +22,8 @@ interface DdsRow {
   БанковскийСчет_Key?: string;  // в УНФ KZ называется так
   Комментарий?: string;
   НазначениеПлатежа?: string;
+  ПериодРегистрации?: string; // для ЗП-выплат — месяц начисления (accrual)
+  Выдать?: string;            // имя сотрудника-получателя в ЗП-выплатах
   Posted?: boolean;
   DeletionMark?: boolean;
   РасшифровкаПлатежа?: Array<{
@@ -155,6 +157,8 @@ async function syncOneDocType(cfg: DocConfig, since: Date, maps: MapsCache): Pro
 
     const commission = num(r.СуммаКомиссииДокумента);
     const paymentPurpose = normalizeName(r.НазначениеПлатежа) || null;
+    const accrualPeriod = r.ПериодРегистрации ? parseDate(r.ПериодРегистрации) : null;
+    const recipientName = normalizeName(r.Выдать) || null;
 
     await prisma.ddsDocument.upsert({
       where: { id: r.Ref_Key },
@@ -179,6 +183,8 @@ async function syncOneDocType(cfg: DocConfig, since: Date, maps: MapsCache): Pro
         accountName: accountId ? maps.bankMap.get(accountId) || null : null,
         comment: normalizeName(r.Комментарий) || null,
         paymentPurpose,
+        accrualPeriod,
+        recipientName,
         posted: r.Posted !== false,
       },
       update: {
@@ -201,6 +207,8 @@ async function syncOneDocType(cfg: DocConfig, since: Date, maps: MapsCache): Pro
         accountName: accountId ? maps.bankMap.get(accountId) || null : null,
         comment: normalizeName(r.Комментарий) || null,
         paymentPurpose,
+        accrualPeriod,
+        recipientName,
         posted: r.Posted !== false,
         syncedAt: new Date(),
       },

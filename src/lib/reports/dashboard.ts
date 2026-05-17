@@ -113,15 +113,15 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     prisma.realizacia.aggregate({
       where: { date: { gte: period.from, lte: period.to }, posted: true },
       _count: true,
-      _sum: { totalAmount: true, totalCost: true },
+      _sum: { itemsAmount: true, totalCost: true },
     }),
     prisma.orderBuyer.count({ where: { posted: true } }),
     prisma.realizacia.groupBy({
       by: ['kontragentName'],
       where: { date: { gte: period.from, lte: period.to }, posted: true },
-      _sum: { totalAmount: true },
+      _sum: { itemsAmount: true },
       _count: true,
-      orderBy: { _sum: { totalAmount: 'desc' } },
+      orderBy: { _sum: { itemsAmount: 'desc' } },
       take: 10,
     }),
     prisma.realizaciaItem.groupBy({
@@ -140,9 +140,9 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     prisma.realizacia.groupBy({
       by: ['responsibleName'],
       where: { date: { gte: period.from, lte: period.to }, posted: true, responsibleName: { not: null } },
-      _sum: { totalAmount: true },
+      _sum: { itemsAmount: true },
       _count: true,
-      orderBy: { _sum: { totalAmount: 'desc' } },
+      orderBy: { _sum: { itemsAmount: 'desc' } },
       take: 8,
     }),
   ]);
@@ -277,7 +277,7 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
 
   // Продажи по менеджерам
   const salesByManager = salesByMgr.map((m) => {
-    const revenue = m._sum.totalAmount || 0;
+    const revenue = m._sum.itemsAmount || 0;
     const orders = m._count;
     return {
       name: m.responsibleName || '—',
@@ -287,7 +287,7 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     };
   });
 
-  const totalRevenue = realStats._sum.totalAmount || 0;
+  const totalRevenue = realStats._sum.itemsAmount || 0;
   const txCount = realStats._count;
   const avgCheck = txCount > 0 ? totalRevenue / txCount : 0;
 
@@ -339,7 +339,7 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     inflowBreakdown,
     topCustomers: topCust.map((c) => ({
       name: c.kontragentName || '—',
-      revenue: c._sum.totalAmount || 0,
+      revenue: c._sum.itemsAmount || 0,
       orders: c._count,
     })),
     topProducts: topProd.map((p) => {

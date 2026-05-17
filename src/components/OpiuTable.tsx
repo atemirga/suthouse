@@ -47,9 +47,21 @@ export default function OpiuTable({ report }: { report: OpiuReport }) {
           <thead>
             <tr>
               <th className="sticky left-0 bg-gray-50 z-10">Показатель</th>
-              {report.columns.map((c) => (
-                <th key={c} className="text-right">{c}</th>
-              ))}
+              {report.columns.map((c) => {
+                const meta = report.columnsMeta?.[c];
+                const closed = meta?.closed;
+                const hasActualCost = meta?.hasActualCost;
+                const title = closed
+                  ? `Месяц закрыт в 1С${hasActualCost ? ' · фактическая себестоимость рассчитана' : ' · себестоимость ещё не пересчитана'}`
+                  : 'Месяц открыт в 1С — себестоимость предварительная';
+                const dot = closed ? (hasActualCost ? '🟢' : '🟡') : '⚪';
+                return (
+                  <th key={c} className="text-right" title={title}>
+                    <span className="mr-1 text-[10px]">{dot}</span>
+                    {c}
+                  </th>
+                );
+              })}
               <th className="text-right">Итого</th>
             </tr>
           </thead>

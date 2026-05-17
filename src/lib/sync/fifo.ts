@@ -53,27 +53,37 @@ interface SaleEvent {
   realizaciaId: string;
 }
 
-type Event = ZakupEvent | SaleEvent;
+interface WriteOffEvent {
+  kind: 'writeoff';
+  date: Date;
+  nomenclatureId: string;
+  qty: number;
+  itemId: string;
+  writeOffId: string;
+}
+
+type Event = ZakupEvent | SaleEvent | WriteOffEvent;
 
 interface ItemUpdate {
   itemId: string;
   costPrice: number;
   costAmount: number;
-  realizaciaId: string;
+  parentId: string;
 }
 
 export interface FifoStats {
   itemsProcessed: number;
   realizationsTouched: number;
-  shortageHits: number; // продажи, для которых очередь была пуста — fallback
-  noPurchaseEver: number; // продажи без единой закупки этого товара — costPrice=0
+  writeOffsTouched: number;
+  shortageHits: number; // расходные операции, для которых очередь была пуста — fallback
+  noPurchaseEver: number; // расходы без единой закупки этого товара — costPrice=0
   durationMs: number;
 }
 
 export async function recomputeFifoCosts(): Promise<FifoStats> {
   const t0 = Date.now();
 
-  const [zakupItems, realizItems] = await Promise.all([
+  const [zakupItems, realizItems, writeOffItems, openingLots] = await Promise.all([
     prisma.zakupkaItem.findMany({
       where: {
         nomenclatureId: { not: null },
@@ -101,10 +111,30 @@ export async function recomputeFifoCosts(): Promise<FifoStats> {
         realizacia: { select: { date: true } },
       },
     }),
+    prisma.writeOffItem.findMany({
+      where: {
+        nomenclatureId: { not: null },
+        quantity: { gt: 0 },
+        writeOff: { posted: true },
+      },
+      select: {
+        id: true,
+        writeOffId: true,
+        nomenclatureId: true,
+        quantity: true,
+        writeOff: { select: { date: true } },
+      },
+    }),
+    // Вступительные остатки — «виртуальные закупки» на дату начала учёта.
+    // Загружаются в очередь FIFO как самая ранняя партия (price = последняя
+    // закупочная цена до этой даты).
+    prisma.inventoryOpening.findMany({
+      select: { asOfDate: true, nomenclatureId: true, qty: true, costPrice: true },
+    }),
   ]);
 
   // Взвешенная средняя цена закупки на номенклатуру — fallback при недостатке
-  // партий в очереди.
+  // партий в очереди. Учитываем и opening lots, и закупки.
   const fallbackPrice = new Map<string, number>();
   {
     const sumQty = new Map<string, number>();
@@ -114,12 +144,26 @@ export async function recomputeFifoCosts(): Promise<FifoStats> {
       sumQty.set(id, (sumQty.get(id) || 0) + z.quantity);
       sumAmount.set(id, (sumAmount.get(id) || 0) + z.price * z.quantity);
     }
+    for (const o of openingLots) {
+      sumQty.set(o.nomenclatureId, (sumQty.get(o.nomenclatureId) || 0) + o.qty);
+      sumAmount.set(o.nomenclatureId, (sumAmount.get(o.nomenclatureId) || 0) + o.costPrice * o.qty);
+    }
     for (const [id, q] of sumQty) {
       if (q > 0) fallbackPrice.set(id, (sumAmount.get(id) || 0) / q);
     }
   }
 
   const events: Event[] = [];
+  // Opening lots = виртуальные закупки на дату opening — заходят в очередь первыми.
+  for (const o of openingLots) {
+    events.push({
+      kind: 'buy',
+      date: o.asOfDate,
+      nomenclatureId: o.nomenclatureId,
+      qty: o.qty,
+      price: o.costPrice,
+    });
+  }
   for (const z of zakupItems) {
     events.push({
       kind: 'buy',
@@ -139,9 +183,18 @@ export async function recomputeFifoCosts(): Promise<FifoStats> {
       realizaciaId: r.realizaciaId,
     });
   }
+  for (const w of writeOffItems) {
+    events.push({
+      kind: 'writeoff',
+      date: w.writeOff.date,
+      nomenclatureId: w.nomenclatureId!,
+      qty: w.quantity,
+      itemId: w.id,
+      writeOffId: w.writeOffId,
+    });
+  }
 
-  // Сортировка по дате asc; при равенстве — закупки раньше продаж того же дня
-  // (типичный случай: пришла поставка утром, продали вечером).
+  // Сортировка по дате asc; при равенстве — закупки раньше расходных операций.
   events.sort((a, b) => {
     const d = a.date.getTime() - b.date.getTime();
     if (d !== 0) return d;
@@ -150,7 +203,8 @@ export async function recomputeFifoCosts(): Promise<FifoStats> {
   });
 
   const queues = new Map<string, Lot[]>();
-  const updates: ItemUpdate[] = [];
+  const saleUpdates: ItemUpdate[] = [];
+  const writeOffUpdates: ItemUpdate[] = [];
   let shortageHits = 0;
   let noPurchaseEver = 0;
 
@@ -165,7 +219,7 @@ export async function recomputeFifoCosts(): Promise<FifoStats> {
       continue;
     }
 
-    // sell
+    // sell / writeoff — обе операции потребляют из той же FIFO-очереди.
     const q = queues.get(ev.nomenclatureId) || [];
     let remaining = ev.qty;
     let costAmount = 0;
@@ -191,24 +245,23 @@ export async function recomputeFifoCosts(): Promise<FifoStats> {
     }
 
     const costPrice = ev.qty > 0 ? costAmount / ev.qty : 0;
-    updates.push({
-      itemId: ev.itemId,
-      costPrice,
-      costAmount,
-      realizaciaId: ev.realizaciaId,
-    });
+    if (ev.kind === 'sell') {
+      saleUpdates.push({ itemId: ev.itemId, costPrice, costAmount, parentId: ev.realizaciaId });
+    } else {
+      writeOffUpdates.push({ itemId: ev.itemId, costPrice, costAmount, parentId: ev.writeOffId });
+    }
   }
 
   // Запись батчами через CASE … WHEN. UPDATE … FROM (VALUES …) быстрее,
   // чем 16K отдельных UPDATE.
   const BATCH = 500;
   const realizCostSum = new Map<string, number>();
+  const writeOffCostSum = new Map<string, number>();
 
-  for (let i = 0; i < updates.length; i += BATCH) {
-    const slice = updates.slice(i, i + BATCH);
+  // 1. RealizaciaItem: costPrice/costAmount
+  for (let i = 0; i < saleUpdates.length; i += BATCH) {
+    const slice = saleUpdates.slice(i, i + BATCH);
     if (slice.length === 0) continue;
-
-    // Собираем VALUES (id, costPrice, costAmount)
     const values = Prisma.join(
       slice.map(
         (u) =>
@@ -221,13 +274,33 @@ export async function recomputeFifoCosts(): Promise<FifoStats> {
       FROM (VALUES ${values}) AS v(id, cp, ca)
       WHERE ri.id = v.id
     `;
-
     for (const u of slice) {
-      realizCostSum.set(u.realizaciaId, (realizCostSum.get(u.realizaciaId) || 0) + u.costAmount);
+      realizCostSum.set(u.parentId, (realizCostSum.get(u.parentId) || 0) + u.costAmount);
     }
   }
 
-  // Обновляем Realizacia.totalCost батчами
+  // 2. WriteOffItem: costPrice + amount = costAmount (списания тоже считаются по FIFO)
+  for (let i = 0; i < writeOffUpdates.length; i += BATCH) {
+    const slice = writeOffUpdates.slice(i, i + BATCH);
+    if (slice.length === 0) continue;
+    const values = Prisma.join(
+      slice.map(
+        (u) =>
+          Prisma.sql`(${u.itemId}::text, ${u.costPrice}::double precision, ${u.costAmount}::double precision)`,
+      ),
+    );
+    await prisma.$executeRaw`
+      UPDATE "WriteOffItem" AS wi
+      SET "costPrice" = v.cp, "amount" = v.ca
+      FROM (VALUES ${values}) AS v(id, cp, ca)
+      WHERE wi.id = v.id
+    `;
+    for (const u of slice) {
+      writeOffCostSum.set(u.parentId, (writeOffCostSum.get(u.parentId) || 0) + u.costAmount);
+    }
+  }
+
+  // 3. Realizacia.totalCost
   const totalCostUpdates = [...realizCostSum.entries()];
   for (let i = 0; i < totalCostUpdates.length; i += BATCH) {
     const slice = totalCostUpdates.slice(i, i + BATCH);
@@ -243,9 +316,26 @@ export async function recomputeFifoCosts(): Promise<FifoStats> {
     `;
   }
 
+  // 4. WriteOff.totalAmount = сумма costAmount по items
+  const writeOffTotalUpdates = [...writeOffCostSum.entries()];
+  for (let i = 0; i < writeOffTotalUpdates.length; i += BATCH) {
+    const slice = writeOffTotalUpdates.slice(i, i + BATCH);
+    if (slice.length === 0) continue;
+    const values = Prisma.join(
+      slice.map(([id, cost]) => Prisma.sql`(${id}::text, ${cost}::double precision)`),
+    );
+    await prisma.$executeRaw`
+      UPDATE "WriteOff" AS w
+      SET "totalAmount" = v.tc
+      FROM (VALUES ${values}) AS v(id, tc)
+      WHERE w.id = v.id
+    `;
+  }
+
   return {
-    itemsProcessed: updates.length,
+    itemsProcessed: saleUpdates.length + writeOffUpdates.length,
     realizationsTouched: realizCostSum.size,
+    writeOffsTouched: writeOffCostSum.size,
     shortageHits,
     noPurchaseEver,
     durationMs: Date.now() - t0,

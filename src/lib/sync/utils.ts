@@ -11,7 +11,14 @@ export function emptyKey(key: string | null | undefined): boolean {
 
 export function syncSinceDate(daysBack?: number): Date {
   const days = daysBack ?? Number(process.env.SYNC_DAYS_BACK || 60);
-  return subDays(new Date(), days);
+  const rolling = subDays(new Date(), days);
+  // Жёсткая нижняя граница: не синкаем документы старше SYNC_SINCE_DATE.
+  // Используется для бизнес-логики «учёт ведём только с конкретной даты».
+  const hardFloor = process.env.SYNC_SINCE_DATE ? new Date(process.env.SYNC_SINCE_DATE) : null;
+  if (hardFloor && !isNaN(hardFloor.getTime()) && hardFloor.getTime() > rolling.getTime()) {
+    return hardFloor;
+  }
+  return rolling;
 }
 
 export function chunk<T>(arr: T[], size: number): T[][] {

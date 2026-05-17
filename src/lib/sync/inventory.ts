@@ -8,6 +8,7 @@ interface InventoryRow {
   Number: string;
   СуммаДокумента?: number;
   Ответственный_Key?: string;
+  Корреспонденция_Key?: string;
   Комментарий?: string;
   Posted?: boolean;
   DeletionMark?: boolean;
@@ -31,10 +32,14 @@ export async function syncWriteOffs(daysBack?: number) {
     throw e;
   }
 
-  const noms = await prisma.nomenclature.findMany({ select: { id: true, name: true } });
-  const users = await prisma.user1C.findMany({ select: { id: true, name: true } });
+  const [noms, users, correspondences] = await Promise.all([
+    prisma.nomenclature.findMany({ select: { id: true, name: true } }),
+    prisma.user1C.findMany({ select: { id: true, name: true } }),
+    prisma.correspondence.findMany({ select: { id: true, description: true } }),
+  ]);
   const nMap = new Map(noms.map((n) => [n.id, n.name]));
   const uMap = new Map(users.map((u) => [u.id, u.name]));
+  const cMap = new Map(correspondences.map((c) => [c.id, c.description]));
 
   let count = 0;
   for (const r of rows) {
@@ -51,6 +56,8 @@ export async function syncWriteOffs(daysBack?: number) {
       };
     });
     const responsibleName = r.Ответственный_Key && !emptyKey(r.Ответственный_Key) ? uMap.get(r.Ответственный_Key) || null : null;
+    const correspondenceId = r.Корреспонденция_Key && !emptyKey(r.Корреспонденция_Key) ? r.Корреспонденция_Key : null;
+    const correspondenceName = correspondenceId ? cMap.get(correspondenceId) || null : null;
 
     await prisma.$transaction(async (tx) => {
       await tx.writeOffItem.deleteMany({ where: { writeOffId: r.Ref_Key } });
@@ -62,6 +69,8 @@ export async function syncWriteOffs(daysBack?: number) {
           number: r.Number || '',
           totalAmount: num(r.СуммаДокумента),
           responsibleName,
+          correspondenceId,
+          correspondenceName,
           comment: normalizeName(r.Комментарий) || null,
           posted: r.Posted !== false,
           items: { create: items },
@@ -71,6 +80,8 @@ export async function syncWriteOffs(daysBack?: number) {
           number: r.Number || '',
           totalAmount: num(r.СуммаДокумента),
           responsibleName,
+          correspondenceId,
+          correspondenceName,
           comment: normalizeName(r.Комментарий) || null,
           posted: r.Posted !== false,
           syncedAt: new Date(),

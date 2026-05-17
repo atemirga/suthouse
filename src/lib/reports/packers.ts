@@ -1,63 +1,46 @@
-// Отчёт «Упаковщики ABC».
-// В этой 1С УНФ KZ поле «Курьер_Key» в заказе используется как «упаковщик/сборщик»
-// (тот, кто фактически собирает заказ к выдаче).
-
+// Отчёт по упаковщикам. Источник — OrderBuyer.packerName, заполняется из 1С
+// (доп.реквизит «Упаковщик» в Document_ЗаказПокупателя_ДополнительныеРеквизиты).
 import { prisma } from '@/lib/db';
 
 export interface PackerRow {
   name: string;
-  ordersCount: number;
-  ordersAmount: number;
-  share: number;
-  cumShare: number;
-  abcClass: 'A' | 'B' | 'C';
+  ordersCount: number;     // всего заказов
+  ordersAmount: number;    // на сумму
+  avgOrder: number;
+  share: number;           // доля по количеству, 0..1
 }
 
 export interface PackersReport {
   from: Date;
   to: Date;
-  totals: { ordersCount: number; ordersAmount: number; packersCount: number };
+  totals: { ordersCount: number; ordersAmount: number };
   rows: PackerRow[];
 }
 
-export async function buildPackers(opts: { from: Date; to: Date }): Promise<PackersReport> {
-  const grouped = await prisma.orderBuyer.groupBy({
-    by: ['courierName'],
-    where: {
-      posted: true,
-      date: { gte: opts.from, lte: opts.to },
-      courierId: { not: null },
-    },
+export async function buildPackersReport(opts: { from: Date; to: Date }): Promise<PackersReport> {
+  const groups = await prisma.orderBuyer.groupBy({
+    by: ['packerName'],
+    where: { posted: true, date: { gte: opts.from, lte: opts.to } },
     _count: true,
     _sum: { totalAmount: true },
   });
 
-  const rows = grouped.map((g) => ({
-    name: g.courierName || '—',
+  const rows: PackerRow[] = groups.map((g) => ({
+    name: g.packerName || '— без упаковщика —',
     ordersCount: g._count,
     ordersAmount: g._sum.totalAmount || 0,
+    avgOrder: g._count > 0 ? (g._sum.totalAmount || 0) / g._count : 0,
     share: 0,
-    cumShare: 0,
-    abcClass: 'C' as 'A' | 'B' | 'C',
-  })).sort((a, b) => b.ordersAmount - a.ordersAmount);
+  })).sort((a, b) => b.ordersCount - a.ordersCount);
 
-  const totalAmount = rows.reduce((s, r) => s + r.ordersAmount, 0);
-  let cum = 0;
-  for (const r of rows) {
-    r.share = totalAmount > 0 ? (r.ordersAmount / totalAmount) * 100 : 0;
-    cum += r.share;
-    r.cumShare = cum;
-    r.abcClass = r.cumShare <= 80 ? 'A' : r.cumShare <= 95 ? 'B' : 'C';
-  }
+  const totalCount = rows.reduce((s, r) => s + r.ordersCount, 0);
+  const totalAmt = rows.reduce((s, r) => s + r.ordersAmount, 0);
+  for (const r of rows) r.share = totalCount > 0 ? r.ordersCount / totalCount : 0;
 
   return {
     from: opts.from,
     to: opts.to,
-    totals: {
-      ordersCount: rows.reduce((s, r) => s + r.ordersCount, 0),
-      ordersAmount: totalAmount,
-      packersCount: rows.length,
-    },
+    totals: { ordersCount: totalCount, ordersAmount: totalAmt },
     rows,
   };
 }

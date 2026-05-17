@@ -137,11 +137,18 @@ model DdsDocument {
   accountName    String?
   comment        String?
   paymentPurpose String? // НазначениеПлатежа (для платёжек) — обогащает drill-down
+  // ПериодРегистрации из 1С — месяц начисления (для ЗП). Платёж от 05.03
+  // может иметь accrualPeriod=2026-02-01 → начислен за февраль. Используется
+  // в ОПиУ для метода начисления (accrual) по ЗП-статьям.
+  accrualPeriod  DateTime?
+  // «Выдать» из 1С — имя сотрудника-получателя в платежках ЗП.
+  recipientName  String?
   posted         Boolean  @default(true)
   syncedAt       DateTime @default(now())
 
   @@index([date])
   @@index([articleId])
+  @@index([accrualPeriod])
   @@index([kontragentId])
   @@index([docType])
   @@index([direction])
@@ -161,7 +168,14 @@ model Realizacia {
   responsibleName String?
   operationType   String?
   totalAmount     Float            @default(0)
+  itemsAmount     Float            @default(0)
   totalCost       Float            @default(0)
+  // Фактическая себестоимость из AccumulationRegister_Запасы_RecordType
+  // (Recorder_Type=Document_РасходнаяНакладная, RecordType=Expense, поле Сумма).
+  // Это с/с после расчёта 1С (включая закрытие месяца) — сходится с финансистом 1:1.
+  // totalCost (FIFO) остаётся как fallback для документов, не синканых из регистра.
+  factCost         Float?
+  factCostSyncedAt DateTime?
   comment         String?
   posted          Boolean          @default(true)
   syncedAt        DateTime         @default(now())
@@ -169,6 +183,7 @@ model Realizacia {
 
   @@index([date])
   @@index([kontragentId])
+  @@index([factCostSyncedAt])
 }
 
 model RealizaciaItem {
@@ -237,10 +252,13 @@ model OrderBuyer {
   kontragentName  String?
   responsibleId   String?
   responsibleName String?
-  // Курьер_Key — в этой конфигурации УНФ используется как «упаковщик/сборщик»
-  // (тот, кто фактически собирает заказ к выдаче). Используется в отчёте «Упаковщики ABC».
+  // Курьер_Key — реальный курьер (доставщик). В этой 1С это только Даулет.
   courierId       String?
   courierName     String?
+  // Упаковщик — кастомное доп.свойство (ДополнительныеРеквизиты,
+  // Свойство_Key=d64eea4f-f086-11f0-ae70-c81f66edd58d). Значение → Catalog_Сотрудники.
+  packerId        String?
+  packerName      String?
   totalAmount     Float     @default(0)
   paidAmount      Float     @default(0)
   status          String?
@@ -253,6 +271,7 @@ model OrderBuyer {
   @@index([status])
   @@index([kontragentId])
   @@index([courierId])
+  @@index([packerId])
 }
 
 // ═══════════════════════════════════════
@@ -260,17 +279,39 @@ model OrderBuyer {
 // ═══════════════════════════════════════
 
 model WriteOff {
-  id              String         @id
-  date            DateTime
-  number          String
-  totalAmount     Float          @default(0)
-  responsibleName String?
-  comment         String?
-  posted          Boolean        @default(true)
-  syncedAt        DateTime       @default(now())
-  items           WriteOffItem[]
+  id                 String         @id
+  date               DateTime
+  number             String
+  totalAmount        Float          @default(0)
+  responsibleName    String?
+  comment            String?
+  // Корреспонденция = счёт плана счетов «Управленческий» в 1С.
+  // По нему различаются виды списаний: Артык салу, Недостачи, Прочие, Усушка и т.п.
+  correspondenceId   String?
+  correspondenceName String?
+  // Фактическая стоимость списания из AccumulationRegister_Запасы_RecordType
+  // в 1С. Точнее нашего FIFO totalAmount; используется в ОПиУ как основное
+  // значение (с fallback на totalAmount если factCost = NULL).
+  factCost           Float?
+  factCostSyncedAt   DateTime?
+  posted             Boolean        @default(true)
+  syncedAt           DateTime       @default(now())
+  items              WriteOffItem[]
+  correspondence     Correspondence? @relation(fields: [correspondenceId], references: [id])
 
   @@index([date])
+  @@index([correspondenceId])
+  @@index([factCostSyncedAt])
+}
+
+// План счетов «Управленческий» из 1С. Используется как справочник видов
+// корреспонденций для списаний (и потенциально для других документов).
+model Correspondence {
+  id          String     @id
+  code        String?
+  description String
+  syncedAt    DateTime   @default(now())
+  writeOffs   WriteOff[]
 }
 
 model WriteOffItem {
@@ -280,7 +321,10 @@ model WriteOffItem {
   nomenclatureId   String?
   nomenclatureName String?
   quantity         Float    @default(0)
+  costPrice        Float    @default(0)
   amount           Float    @default(0)
+
+  @@index([nomenclatureId])
 }
 
 model Capitalization {
@@ -400,6 +444,23 @@ model SalesPlan {
   @@index([scope, scopeId])
 }
 
+// Вступительные «лоты» по FIFO на дату начала учёта (например 2025-12-31).
+// Каждая позиция = (номенклатура, qty остатка, costPrice = последняя цена
+// закупки до этой даты). FIFO загружает их первыми в очередь — это
+// заменяет историю закупок 2025 года, которую мы не храним.
+model InventoryOpening {
+  id               String   @id @default(cuid())
+  asOfDate         DateTime
+  nomenclatureId   String
+  nomenclatureName String?
+  qty              Float
+  costPrice        Float
+  syncedAt         DateTime @default(now())
+
+  @@unique([asOfDate, nomenclatureId])
+  @@index([nomenclatureId])
+}
+
 model SyncLog {
   id         String    @id @default(cuid())
   startedAt  DateTime  @default(now())
@@ -407,4 +468,22 @@ model SyncLog {
   status     String    @default("running") // running | success | error
   details    String? // JSON
   error      String?
+}
+
+// Документ «Закрытие месяца» из 1С. Каждый закрываемый месяц обычно
+// представлен 4-5 документами с разными флагами (РасчетПрямыхЗатрат,
+// РаспределениеЗатрат, РасчетФактическойСебестоимости, РасчетФинансового-
+// Результата). Мы агрегируем их в один признак «месяц закрыт» по
+// yearMonth = первые 7 символов Date.
+model MonthClose {
+  yearMonth                    String   @id // "2026-04"
+  closedAt                     DateTime
+  // Какие этапы закрытия проведены (для диагностики)
+  hasDirectCostCalc            Boolean  @default(false) // РасчетПрямыхЗатрат
+  hasCostDistribution          Boolean  @default(false) // РаспределениеЗатрат
+  hasActualCost                Boolean  @default(false) // РасчетФактическойСебестоимости — критично для COGS
+  hasFinancialResult           Boolean  @default(false) // РасчетФинансовогоРезультата
+  // Список Ref_Key документов из 1С — для отладки
+  docRefs                      String?  // JSON array
+  syncedAt                     DateTime @default(now())
 }

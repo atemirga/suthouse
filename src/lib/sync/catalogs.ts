@@ -242,6 +242,28 @@ export async function syncKassy() {
   return count;
 }
 
+// План счетов «Управленческий» = справочник видов корреспонденций
+// для списаний (Артык салу, Недостачи, Усушка, Прочие и т.п.).
+export async function syncCorrespondences() {
+  const rows = await fetchAllOData<CatRow & { Code?: string }>(
+    'ChartOfAccounts_Управленческий',
+    { select: 'Ref_Key,Code,Description' },
+  );
+  let count = 0;
+  for (const r of rows) {
+    if (emptyKey(r.Ref_Key)) continue;
+    const description = normalizeName(r.Description) || '[Корреспонденция]';
+    const code = (r.Code || '').trim() || null;
+    await prisma.correspondence.upsert({
+      where: { id: r.Ref_Key },
+      create: { id: r.Ref_Key, code, description },
+      update: { code, description, syncedAt: new Date() },
+    });
+    count++;
+  }
+  return count;
+}
+
 export async function syncBankAccounts() {
   const rows = await fetchAllOData<CatRow>('Catalog_БанковскиеСчета', {
     select: 'Ref_Key,Description',
@@ -326,12 +348,13 @@ export async function syncAllCatalogs() {
   ]);
   // Категории номенклатуры нужны до самой номенклатуры (для resolve КатегорияНоменклатуры_Key).
   const nomCategories = await syncNomenclatureCategories();
-  const [kontragenty, articles, nom, kassy, banks] = await Promise.all([
+  const [kontragenty, articles, nom, kassy, banks, correspondences] = await Promise.all([
     syncKontragenty(),
     syncDdsArticles(),
     syncNomenclature(),
     syncKassy(),
     syncBankAccounts(),
+    syncCorrespondences(),
   ]);
-  return { users, employees, sources, kontragenty, articles, nomenclature: nom, nomCategories, kassy, banks };
+  return { users, employees, sources, kontragenty, articles, nomenclature: nom, nomCategories, kassy, banks, correspondences };
 }

@@ -65,6 +65,7 @@ const groups: NavGroup[] = [
       { href: '/sales/by-sku', label: 'По SKU и менеджерам', icon: IconCart, hint: 'Позиции × менеджер' },
       { href: '/sales/funnel', label: 'Воронка продаж', icon: IconUsers, hint: 'По источникам привлечения' },
       { href: '/sales/by-manager', label: 'Заказы менеджеров', icon: IconUsers, hint: 'Кто что выполнил' },
+      { href: '/packers', label: 'Упаковщики', icon: IconBox, hint: 'Кто фактически собирал заказы' },
       { href: '/sales/plans', label: 'Планы продаж', icon: IconTrend, hint: 'Установка целевых планов' },
       { href: '/sales/plan-fact', label: 'План-факт анализ', icon: IconTrend, hint: 'Сравнение план vs факт' },
     ],
@@ -91,8 +92,6 @@ const groups: NavGroup[] = [
     label: 'Операционные',
     icon: IconBuilding,
     items: [
-      { href: '/rnp', label: 'РНП — Заказы в работе', icon: IconRnp, hint: 'Заказы покупателей' },
-      { href: '/packers', label: 'Упаковщики', icon: IconUsers, hint: 'Отчёт по упаковщикам ABC' },
       { href: '/anomalies', label: 'Аномалии', icon: IconWarning, hint: 'Ошибки данных, подозрительные документы' },
     ],
   },

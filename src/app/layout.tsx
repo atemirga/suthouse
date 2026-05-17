@@ -6,7 +6,7 @@ import Sidebar from '@/components/Sidebar';
 
 export const metadata: Metadata = {
   title: 'SUT HOUSE — Финансовая отчётность',
-  description: 'ОПиУ, ДДС, РНП по данным из 1С:УНФ',
+  description: 'ОПиУ, ДДС по данным из 1С:УНФ',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
