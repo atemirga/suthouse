@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db';
-import { startOfMonth, endOfMonth, parseISO } from 'date-fns';
+import { startOfMonth, endOfMonth, startOfDay, endOfDay, parseISO } from 'date-fns';
 import { buildDashboard } from '@/lib/reports/dashboard';
 import PeriodPicker from '@/components/PeriodPicker';
 import Dashboard from '@/components/Dashboard';
@@ -11,8 +11,8 @@ interface Props {
 }
 
 export default async function DashboardPage({ searchParams }: Props) {
-  const from = searchParams.from ? parseISO(searchParams.from) : startOfMonth(new Date());
-  const to = searchParams.to ? parseISO(searchParams.to) : endOfMonth(new Date());
+  const from = searchParams.from ? startOfDay(parseISO(searchParams.from)) : startOfMonth(new Date());
+  const to = searchParams.to ? endOfDay(parseISO(searchParams.to)) : endOfMonth(new Date());
   const granularity = (searchParams.granularity as any) || 'month';
 
   const [data, lastSync, unmappedCount] = await Promise.all([

@@ -1,4 +1,4 @@
-import { startOfMonth, endOfMonth, parseISO } from 'date-fns';
+import { startOfMonth, endOfMonth, startOfDay, endOfDay, parseISO } from 'date-fns';
 import { buildDdsByKassa } from '@/lib/reports/dds-by-kassa';
 import PeriodPicker from '@/components/PeriodPicker';
 import KassaClient from '@/components/KassaClient';
@@ -10,8 +10,8 @@ interface Props {
 }
 
 export default async function DdsByKassaPage({ searchParams }: Props) {
-  const from = searchParams.from ? parseISO(searchParams.from) : startOfMonth(new Date());
-  const to = searchParams.to ? parseISO(searchParams.to) : endOfMonth(new Date());
+  const from = searchParams.from ? startOfDay(parseISO(searchParams.from)) : startOfMonth(new Date());
+  const to = searchParams.to ? endOfDay(parseISO(searchParams.to)) : endOfMonth(new Date());
   const report = await buildDdsByKassa({ from, to });
 
   return (

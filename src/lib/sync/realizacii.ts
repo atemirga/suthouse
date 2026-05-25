@@ -10,6 +10,7 @@ interface RealizaciaRow {
   СуммаДокумента?: number;
   Контрагент_Key?: string;
   Ответственный_Key?: string;
+  Автор_Key?: string;
   ВидОперации?: string;
   Комментарий?: string;
   Posted?: boolean;
@@ -27,7 +28,7 @@ const RESOURCE_ALIASES = ['Document_РасходнаяНакладная', 'Docu
 
 async function fetchRealizacii(filter: string): Promise<RealizaciaRow[]> {
   const select =
-    'Ref_Key,Date,Number,СуммаДокумента,Контрагент_Key,Ответственный_Key,ВидОперации,Комментарий,Posted,DeletionMark,Запасы';
+    'Ref_Key,Date,Number,СуммаДокумента,Контрагент_Key,Ответственный_Key,Автор_Key,ВидОперации,Комментарий,Posted,DeletionMark,Запасы';
   let lastErr: any = null;
   for (const r of RESOURCE_ALIASES) {
     try {
@@ -55,9 +56,11 @@ export async function syncRealizacii(daysBack?: number) {
   const kMap = new Map(konts.map((k) => [k.id, k.name]));
   const nMap = new Map(noms.map((n) => [n.id, n.name]));
   // «Ответственный» в Реализации ссылается на Catalog_Сотрудники.
+  // «Автор» — на Catalog_Пользователи.
   const uMap = new Map(users.map((u) => [u.id, u.name]));
   const eMap = new Map(employees.map((e) => [e.id, e.name]));
   const resolveResp = (id: string | null) => (id ? (eMap.get(id) || uMap.get(id) || null) : null);
+  const resolveAuthor = (id: string | null) => (id ? (uMap.get(id) || eMap.get(id) || null) : null);
 
   let count = 0;
   for (const r of rows) {
@@ -67,6 +70,7 @@ export async function syncRealizacii(daysBack?: number) {
 
     const kontragentId = r.Контрагент_Key && !emptyKey(r.Контрагент_Key) ? r.Контрагент_Key : null;
     const responsibleId = r.Ответственный_Key && !emptyKey(r.Ответственный_Key) ? r.Ответственный_Key : null;
+    const authorId = r.Автор_Key && !emptyKey(r.Автор_Key) ? r.Автор_Key : null;
 
     // costPrice здесь — приближение по последней закупочной цене. После
     // syncZakupki + syncRealizacii пайплайн вызывает recomputeFifoCosts,
@@ -105,6 +109,8 @@ export async function syncRealizacii(daysBack?: number) {
           kontragentName: kontragentId ? kMap.get(kontragentId) || `[${kontragentId.slice(0, 8)}]` : null,
           responsibleId,
           responsibleName: resolveResp(responsibleId),
+          authorId,
+          authorName: resolveAuthor(authorId),
           operationType: r.ВидОперации || null,
           totalAmount: num(r.СуммаДокумента),
           itemsAmount,
@@ -120,6 +126,8 @@ export async function syncRealizacii(daysBack?: number) {
           kontragentName: kontragentId ? kMap.get(kontragentId) || `[${kontragentId.slice(0, 8)}]` : null,
           responsibleId,
           responsibleName: resolveResp(responsibleId),
+          authorId,
+          authorName: resolveAuthor(authorId),
           operationType: r.ВидОперации || null,
           totalAmount: num(r.СуммаДокумента),
           itemsAmount,

@@ -135,6 +135,14 @@ model DdsDocument {
   kassaToName    String?
   accountId      String?
   accountName    String?
+  // «Вторая сторона» для transfer-документов:
+  //   ВзносНаличнымиВБанк (РасходИзКассы):       kassaId → accountId (банк-получатель)
+  //   ПолучениеНаличныхВБанке (ПоступлениеВКассу): accountId → kassaId (банк-источник)
+  //   ПереводНаДругойСчет (РасходСоСчета):       accountId → accountToId (банк-получатель)
+  //   ПеремещениеДС (kassa↔kassa):               kassaId → kassaToId
+  // Для обычных не-transfer документов accountToId всегда null.
+  accountToId    String?
+  accountToName  String?
   comment        String?
   paymentPurpose String? // НазначениеПлатежа (для платёжек) — обогащает drill-down
   // ПериодРегистрации из 1С — месяц начисления (для ЗП). Платёж от 05.03
@@ -166,6 +174,11 @@ model Realizacia {
   kontragentName  String?
   responsibleId   String?
   responsibleName String?
+  // Автор документа (Catalog_Пользователи) — пользователь, создавший запись в 1С.
+  // Используется как fallback для responsibleName в дебиторке: в 1С «Ответственный»
+  // часто пуст, а «Автор» проставляется системой всегда.
+  authorId        String?
+  authorName      String?
   operationType   String?
   totalAmount     Float            @default(0)
   itemsAmount     Float            @default(0)
@@ -262,16 +275,37 @@ model OrderBuyer {
   totalAmount     Float     @default(0)
   paidAmount      Float     @default(0)
   status          String?
+  // СостояниеЗаказа из 1С (Catalog_СостоянияЗаказовПокупателей). Используется
+  // для определения «отгружено» (=«Завершен») / «в работе» / «проблема» в отчёте
+  // по упаковщикам. Хранятся и id, и имя — имя для прямой фильтрации без джойнов.
+  stateId         String?
+  stateName       String?
   shipmentDate    DateTime?
   comment         String?
   posted          Boolean   @default(true)
   syncedAt        DateTime  @default(now())
+  items           OrderBuyerItem[]
 
   @@index([date])
   @@index([status])
   @@index([kontragentId])
   @@index([courierId])
   @@index([packerId])
+  @@index([stateName])
+}
+
+model OrderBuyerItem {
+  id               String     @id @default(cuid())
+  orderBuyerId     String
+  orderBuyer       OrderBuyer @relation(fields: [orderBuyerId], references: [id], onDelete: Cascade)
+  nomenclatureId   String?
+  nomenclatureName String?
+  quantity         Float      @default(0)
+  price            Float      @default(0)
+  amount           Float      @default(0)
+
+  @@index([orderBuyerId])
+  @@index([nomenclatureId])
 }
 
 // ═══════════════════════════════════════

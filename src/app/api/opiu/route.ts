@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { buildOpiu, drillOpiu, type OpiuCategory } from '@/lib/reports/opiu';
-import { startOfMonth, endOfMonth, parseISO } from 'date-fns';
+import { startOfMonth, endOfMonth, startOfDay, endOfDay, parseISO } from 'date-fns';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -12,14 +12,14 @@ export async function GET(req: NextRequest) {
   const granularity = (url.searchParams.get('granularity') as 'day' | 'week' | 'month') || 'month';
   const drillCategory = url.searchParams.get('drill') as OpiuCategory | null;
 
-  const from = fromStr ? parseISO(fromStr) : startOfMonth(new Date());
-  const to = toStr ? parseISO(toStr) : endOfMonth(new Date());
+  const from = fromStr ? startOfDay(parseISO(fromStr)) : startOfMonth(new Date());
+  const to = toStr ? endOfDay(parseISO(toStr)) : endOfMonth(new Date());
 
   if (drillCategory) {
     const docs = await drillOpiu(drillCategory, from, to);
     return NextResponse.json({ category: drillCategory, docs });
   }
 
-  const report = await buildOpiu({ from, to, granularity });
+  const report = await buildOpiu({ from, to, granularity, view: 'financist' });
   return NextResponse.json(report);
 }

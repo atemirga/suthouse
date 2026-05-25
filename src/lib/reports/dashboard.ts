@@ -2,6 +2,7 @@ import { prisma } from '@/lib/db';
 import { resolvePeriod, type PeriodInput } from './period';
 import { buildOpiu } from './opiu';
 import { buildReceivables, AGING_BUCKETS, type BucketKey } from './receivables';
+import { buildCashPositions } from './cash-balances';
 
 export interface DashboardData {
   from: Date;
@@ -72,7 +73,7 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     prevReport,
     dds,
     ddsPrev,
-    allDdsForBalance,
+    cashPositionsAll,
     realStats,
     activeOrders,
     topCust,
@@ -95,21 +96,8 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
       where: { date: { gte: prevFrom, lte: prevTo } },
       select: { amount: true, direction: true, docType: true },
     }),
-    // Все ДДС до конца периода — для расчёта остатков касс/счетов
-    prisma.ddsDocument.findMany({
-      where: { date: { lte: period.to } },
-      select: {
-        amount: true,
-        direction: true,
-        docType: true,
-        kassaId: true,
-        kassaName: true,
-        kassaToId: true,
-        kassaToName: true,
-        accountId: true,
-        accountName: true,
-      },
-    }),
+    // Остатки касс/счетов на конец периода (единый расчёт с дебиторкой и /dds/by-kassa).
+    buildCashPositions(period.to),
     prisma.realizacia.aggregate({
       where: { date: { gte: period.from, lte: period.to }, posted: true },
       _count: true,
@@ -220,47 +208,9 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     .sort((a, b) => b.amount - a.amount)
     .slice(0, 10);
 
-  // Остатки по кассам и банковским счетам = opening balance + изменения с opening date.
-  // Учитываем перемещения: kassaId — откуда (− сумма), kassaToId — куда (+ сумма).
-  const openingCash = await prisma.openingBalance.findMany({
-    where: { kind: 'cash' },
-    select: { refId: true, refName: true, refType: true, amount: true },
-  });
-  const cashByKey = new Map<string, { name: string; type: 'kassa' | 'bank'; balance: number }>();
-  for (const o of openingCash) {
-    cashByKey.set(o.refId, {
-      name: o.refName || '—',
-      type: (o.refType as 'kassa' | 'bank') || 'kassa',
-      balance: o.amount,
-    });
-  }
-  function bumpByName(name: string | null, kassaId: string | null, accountId: string | null, amount: number, isBank: boolean) {
-    const id = accountId || kassaId;
-    if (!id || !name) return;
-    let v = cashByKey.get(id);
-    if (!v) {
-      v = { name, type: isBank ? 'bank' : 'kassa', balance: 0 };
-      cashByKey.set(id, v);
-    } else if (!v.name || v.name === '—') {
-      v.name = name;
-    }
-    v.balance += amount;
-  }
-  for (const d of allDdsForBalance) {
-    if (d.docType === 'PeremeschenieDC') {
-      bumpByName(d.kassaName, d.kassaId, null, -d.amount, false);
-      bumpByName(d.kassaToName, d.kassaToId, null, d.amount, false);
-      continue;
-    }
-    const sign = d.direction === 'inflow' ? 1 : d.direction === 'outflow' ? -1 : 0;
-    if (sign === 0) continue;
-    if (d.kassaId) bumpByName(d.kassaName, d.kassaId, null, sign * d.amount, false);
-    if (d.accountId) bumpByName(d.accountName, null, d.accountId, sign * d.amount, true);
-  }
-  const cashPositions = Array.from(cashByKey.values())
-    .filter((p) => Math.abs(p.balance) > 1)
-    .sort((a, b) => b.balance - a.balance);
-
+  // Остатки касс/счетов на конец периода — посчитаны в buildCashPositions выше.
+  // Из единого хелпера (см. cash-balances.ts) — той же логикой, что и /dds/by-kassa.
+  const cashPositions = cashPositionsAll.map((p) => ({ name: p.name, type: p.type, balance: p.balance }));
   const totalCashBalance = cashPositions.reduce((s, p) => s + p.balance, 0);
 
   // Сводка дебиторки

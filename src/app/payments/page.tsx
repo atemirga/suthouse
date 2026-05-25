@@ -1,4 +1,4 @@
-import { startOfMonth, endOfMonth, parseISO } from 'date-fns';
+import { startOfMonth, endOfMonth, startOfDay, endOfDay, parseISO } from 'date-fns';
 import { buildPayments, listKassasAndAccounts } from '@/lib/reports/payments';
 import PeriodPicker from '@/components/PeriodPicker';
 import PaymentsClient from '@/components/PaymentsClient';
@@ -10,8 +10,11 @@ interface Props {
 }
 
 export default async function PaymentsPage({ searchParams }: Props) {
-  const from = searchParams.from ? parseISO(searchParams.from) : startOfMonth(new Date());
-  const to = searchParams.to ? parseISO(searchParams.to) : endOfMonth(new Date());
+  // PeriodPicker отдаёт yyyy-MM-dd без времени. parseISO интерпретирует это как
+  // 00:00 — для `to` это «начало последнего дня», поэтому весь последний день
+  // выпадал из выборки. Для «Сегодня/Вчера» (from==to) фильтр давал 0 записей.
+  const from = searchParams.from ? startOfDay(parseISO(searchParams.from)) : startOfMonth(new Date());
+  const to = searchParams.to ? endOfDay(parseISO(searchParams.to)) : endOfMonth(new Date());
   const [report, refs] = await Promise.all([
     buildPayments({
       from, to,

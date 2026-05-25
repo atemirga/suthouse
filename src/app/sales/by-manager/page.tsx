@@ -1,4 +1,4 @@
-import { startOfMonth, endOfMonth, parseISO } from 'date-fns';
+import { startOfMonth, endOfMonth, startOfDay, endOfDay, parseISO } from 'date-fns';
 import { buildOrdersByManager } from '@/lib/reports/orders-by-manager';
 import PeriodPicker from '@/components/PeriodPicker';
 import ManagersClient from '@/components/ManagersClient';
@@ -10,8 +10,8 @@ interface Props {
 }
 
 export default async function ByManagerPage({ searchParams }: Props) {
-  const from = searchParams.from ? parseISO(searchParams.from) : startOfMonth(new Date());
-  const to = searchParams.to ? parseISO(searchParams.to) : endOfMonth(new Date());
+  const from = searchParams.from ? startOfDay(parseISO(searchParams.from)) : startOfMonth(new Date());
+  const to = searchParams.to ? endOfDay(parseISO(searchParams.to)) : endOfMonth(new Date());
   const report = await buildOrdersByManager({ from, to });
 
   return (

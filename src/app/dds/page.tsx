@@ -4,7 +4,7 @@ import DdsFiltersBar from '@/components/DdsFiltersBar';
 import ExportButton from '@/components/ExportButton';
 import { buildDds } from '@/lib/reports/dds';
 import { prisma } from '@/lib/db';
-import { startOfMonth, endOfMonth, parseISO } from 'date-fns';
+import { startOfMonth, endOfMonth, startOfDay, endOfDay, parseISO } from 'date-fns';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,8 +22,8 @@ interface Props {
 }
 
 export default async function DdsPage({ searchParams }: Props) {
-  const from = searchParams.from ? parseISO(searchParams.from) : startOfMonth(new Date());
-  const to = searchParams.to ? parseISO(searchParams.to) : endOfMonth(new Date());
+  const from = searchParams.from ? startOfDay(parseISO(searchParams.from)) : startOfMonth(new Date());
+  const to = searchParams.to ? endOfDay(parseISO(searchParams.to)) : endOfMonth(new Date());
   const granularity = (searchParams.granularity as any) || 'month';
 
   const [report, kassy, banks, articles] = await Promise.all([

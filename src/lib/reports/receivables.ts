@@ -42,6 +42,9 @@ export interface ReceivableRow {
   buckets: Record<BucketKey, number>;
   oldestDate: Date | null;
   oldestDays: number;    // возраст самой старой непогашенной отгрузки в днях
+  // Менеджер последней отгрузки (приближение «ответственный за клиента»). Может
+  // быть null для openings и для платежей без отгрузок.
+  responsibleName: string | null;
 }
 
 export interface ReceivablesReport {
@@ -71,10 +74,10 @@ export async function buildReceivables(opts: BuildOpts = {}): Promise<Receivable
   // Берём только проведённые документы. Возвраты от покупателя в zakupki не трогаем —
   // у них direction нет, это другой контур. AR строим только на основании реализаций
   // и ДДС-поступлений.
-  const [realizations, payments, openings] = await Promise.all([
+  const [realizations, payments, openings, kontragentResponsibles] = await Promise.all([
     prisma.realizacia.findMany({
       where: { posted: true, kontragentId: { not: null }, date: { lte: asOf } },
-      select: { kontragentId: true, kontragentName: true, totalAmount: true, date: true, number: true },
+      select: { kontragentId: true, kontragentName: true, totalAmount: true, date: true, number: true, responsibleName: true, authorName: true },
       orderBy: { date: 'asc' },
     }),
     prisma.ddsDocument.findMany({
@@ -93,12 +96,26 @@ export async function buildReceivables(opts: BuildOpts = {}): Promise<Receivable
       where: { kind: 'ar' },
       select: { refId: true, refName: true, amount: true, asOfDate: true },
     }),
+    // Менеджер-по-клиенту из карточки контрагента (Catalog_Контрагенты,
+    // Ответственный_Key). Используется как последний fallback для opening-only
+    // долгов, у которых нет ни одной синканной реализации.
+    prisma.kontragent.findMany({
+      where: { responsible: { not: null } },
+      select: { id: true, responsible: true },
+    }),
   ]);
+  const kontragentRespMap = new Map(
+    kontragentResponsibles.map((k) => [k.id, k.responsible as string]),
+  );
 
   // Группируем
-  type Shipment = { date: Date; amount: number; remaining: number; number: string };
+  type Shipment = { date: Date; amount: number; remaining: number; number: string; responsibleName: string | null };
   const shipMap = new Map<string, Shipment[]>();
   const nameMap = new Map<string, string>();
+  // «Автор» в колонке = responsibleName последней реализации; если все пусты —
+  // authorName последней реализации (системный автор документа из 1С).
+  const lastResponsibleMap = new Map<string, { date: Date; name: string }>();
+  const lastAuthorMap = new Map<string, { date: Date; name: string }>();
 
   // Opening balances идут в начало списка отгрузок как самая ранняя «отгрузка»
   // на дату opening. Отрицательные opening (= аванс получ.) добавятся как
@@ -109,7 +126,7 @@ export async function buildReceivables(opts: BuildOpts = {}): Promise<Receivable
       nameMap.set(o.refId, o.refName || '—');
       let arr = shipMap.get(o.refId);
       if (!arr) { arr = []; shipMap.set(o.refId, arr); }
-      arr.push({ date: openingDate, amount: o.amount, remaining: o.amount, number: 'opening' });
+      arr.push({ date: openingDate, amount: o.amount, remaining: o.amount, number: 'opening', responsibleName: null });
     }
   }
 
@@ -118,7 +135,19 @@ export async function buildReceivables(opts: BuildOpts = {}): Promise<Receivable
     nameMap.set(r.kontragentId, r.kontragentName || '—');
     let arr = shipMap.get(r.kontragentId);
     if (!arr) { arr = []; shipMap.set(r.kontragentId, arr); }
-    arr.push({ date: r.date, amount: r.totalAmount, remaining: r.totalAmount, number: r.number });
+    arr.push({ date: r.date, amount: r.totalAmount, remaining: r.totalAmount, number: r.number, responsibleName: r.responsibleName });
+    if (r.responsibleName) {
+      const prev = lastResponsibleMap.get(r.kontragentId);
+      if (!prev || prev.date < r.date) {
+        lastResponsibleMap.set(r.kontragentId, { date: r.date, name: r.responsibleName });
+      }
+    }
+    if (r.authorName) {
+      const prev = lastAuthorMap.get(r.kontragentId);
+      if (!prev || prev.date < r.date) {
+        lastAuthorMap.set(r.kontragentId, { date: r.date, name: r.authorName });
+      }
+    }
   }
   // Сортируем отгрузки внутри каждого контрагента по дате — opening попадёт в начало.
   for (const arr of shipMap.values()) arr.sort((a, b) => a.date.getTime() - b.date.getTime());
@@ -180,6 +209,11 @@ export async function buildReceivables(opts: BuildOpts = {}): Promise<Receivable
       buckets,
       oldestDate,
       oldestDays,
+      responsibleName:
+        lastResponsibleMap.get(kontragentId)?.name ||
+        lastAuthorMap.get(kontragentId)?.name ||
+        kontragentRespMap.get(kontragentId) ||
+        null,
     });
   }
 

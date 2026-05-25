@@ -1,4 +1,4 @@
-import { startOfMonth, endOfMonth, parseISO } from 'date-fns';
+import { startOfMonth, endOfMonth, startOfDay, endOfDay, parseISO } from 'date-fns';
 import { buildAbc, type AbcParam } from '@/lib/reports/abc';
 import PeriodPicker from '@/components/PeriodPicker';
 import AbcClient from '@/components/AbcClient';
@@ -10,8 +10,8 @@ interface Props {
 }
 
 export default async function AbcPage({ searchParams }: Props) {
-  const from = searchParams.from ? parseISO(searchParams.from) : startOfMonth(new Date());
-  const to = searchParams.to ? parseISO(searchParams.to) : endOfMonth(new Date());
+  const from = searchParams.from ? startOfDay(parseISO(searchParams.from)) : startOfMonth(new Date());
+  const to = searchParams.to ? endOfDay(parseISO(searchParams.to)) : endOfMonth(new Date());
   const param = (searchParams.param as AbcParam) || 'revenue';
   const report = await buildAbc({ from, to, param });
 
@@ -20,7 +20,7 @@ export default async function AbcPage({ searchParams }: Props) {
       <div>
         <h1 className="text-2xl font-bold text-gray-900">ABC-анализ номенклатуры</h1>
         <p className="text-sm text-gray-500 mt-0.5">
-          Парето 80/15/5 — что приносит основные деньги. Класс A = 80% выручки, B = 15%, C = 5%.
+          Парето 80/15/5 по выручке, прибыли или массе (кг). Себестоимость согласована с фактом 1С.
         </p>
       </div>
       <PeriodPicker showGranularity={false} />
