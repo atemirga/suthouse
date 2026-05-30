@@ -1,3 +1,4 @@
+import { eachDayOfInterval, format } from 'date-fns';
 import { prisma } from '@/lib/db';
 import { resolvePeriod, type PeriodInput } from './period';
 import { buildOpiu } from './opiu';
@@ -50,6 +51,10 @@ export interface DashboardData {
     cashIn: number;
     cashOut: number;
   }[];
+  // Дневные мини-тренды для hero-карточек (всегда ≥2 точек, даже когда series = 1 месяц)
+  heroSpark: { cash: number[]; revenue: number[]; profit: number[] };
+  // Дневная выручка для календарной heatmap
+  salesDaily: { date: string; revenue: number }[];
   expenseBreakdown: { category: string; label: string; amount: number }[];
   inflowBreakdown: { article: string; amount: number }[];
   topCustomers: { name: string; revenue: number; orders: number }[];
@@ -59,6 +64,7 @@ export interface DashboardData {
   topDebtors: { name: string; debt: number; oldestDays: number }[];
   cashPositions: { name: string; type: 'kassa' | 'bank'; balance: number }[];
   salesByManager: { name: string; revenue: number; orders: number; avgCheck: number }[];
+  orderStates: { state: string; count: number; bucket: 'done' | 'inProgress' | 'problem' | 'unknown' }[];
 }
 
 export async function buildDashboard(input: PeriodInput): Promise<DashboardData> {
@@ -75,13 +81,14 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     ddsPrev,
     cashPositionsAll,
     realStats,
-    activeOrders,
+    orderStatesAgg,
     topCust,
     topProd,
     articles,
     receivables,
     discountAgg,
     salesByMgr,
+    realizaciaDaily,
   ] = await Promise.all([
     buildOpiu({ from: period.from, to: period.to, granularity: period.granularity }),
     buildOpiu({ from: prevFrom, to: prevTo, granularity: period.granularity }),
@@ -103,7 +110,13 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
       _count: true,
       _sum: { itemsAmount: true, totalCost: true },
     }),
-    prisma.orderBuyer.count({ where: { posted: true } }),
+    // Разрез заказов покупателей по СостоянияЗаказовПокупателей в выбранном периоде.
+    // «Активные» = НЕ завершённые. См. orderStatesAgg ниже + activeOrdersCount.
+    prisma.orderBuyer.groupBy({
+      by: ['stateName'],
+      where: { posted: true, date: { gte: period.from, lte: period.to } },
+      _count: true,
+    }),
     prisma.realizacia.groupBy({
       by: ['kontragentName'],
       where: { date: { gte: period.from, lte: period.to }, posted: true },
@@ -132,6 +145,11 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
       _count: true,
       orderBy: { _sum: { itemsAmount: 'desc' } },
       take: 8,
+    }),
+    // Дневные продажи для hero-спарклайнов (выручка + себестоимость по дням)
+    prisma.realizacia.findMany({
+      where: { date: { gte: period.from, lte: period.to }, posted: true },
+      select: { date: true, itemsAmount: true, totalCost: true },
     }),
   ]);
 
@@ -170,6 +188,36 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     }
   }
   const series = Array.from(seriesMap.values());
+
+  // Дневные мини-тренды для hero-карточек: по дням периода, чтобы линия была видна
+  // даже когда series = 1 месячная колонка.
+  const dayKeys = eachDayOfInterval({ start: period.from, end: period.to })
+    .map((d) => format(d, 'yyyy-MM-dd'));
+  const cashByDay = new Map<string, number>(dayKeys.map((k) => [k, 0]));
+  const revByDay = new Map<string, number>(dayKeys.map((k) => [k, 0]));
+  const profitByDay = new Map<string, number>(dayKeys.map((k) => [k, 0]));
+  for (const d of dds) {
+    const k = format(d.date, 'yyyy-MM-dd');
+    if (!cashByDay.has(k)) continue;
+    if (d.docType === 'PeremeschenieDC') continue; // перемещения не влияют на net-кэш
+    if (d.direction === 'inflow') cashByDay.set(k, cashByDay.get(k)! + d.amount);
+    else if (d.direction === 'outflow') cashByDay.set(k, cashByDay.get(k)! - d.amount);
+  }
+  for (const r of realizaciaDaily) {
+    const k = format(r.date, 'yyyy-MM-dd');
+    if (!revByDay.has(k)) continue;
+    const rev = r.itemsAmount || 0;
+    revByDay.set(k, revByDay.get(k)! + rev);
+    profitByDay.set(k, profitByDay.get(k)! + (rev - (r.totalCost || 0)));
+  }
+  // Накопленный (кумулятивный) net-кэш — линия плавно растёт/падает, выглядит как тренд остатка
+  let cashAcc = 0;
+  const heroSpark = {
+    cash: dayKeys.map((k) => (cashAcc += cashByDay.get(k)!)),
+    revenue: dayKeys.map((k) => revByDay.get(k)!),
+    profit: dayKeys.map((k) => profitByDay.get(k)!),
+  };
+  const salesDaily = dayKeys.map((k) => ({ date: k, revenue: revByDay.get(k)! }));
 
   let prevCashIn = 0, prevCashOut = 0;
   for (const d of ddsPrev) {
@@ -225,6 +273,34 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     .slice(0, 10)
     .map((r) => ({ name: r.kontragentName, debt: r.totalDebt, oldestDays: r.oldestDays }));
 
+  // Состояния заказов покупателей за период.
+  // bucket'ы:
+  //  - done   = «Завершен», «Завершен ОТК менеджер»
+  //  - problem = «Проблема»
+  //  - inProgress = всё остальное названное состояние («В работе», «В ожидании», «ОТК Менеджер», «ОТК Зав Склад» и т.д.)
+  //  - unknown = stateName == null (старые заказы без проставленного состояния)
+  const DONE_STATES = new Set(['Завершен', 'Завершен ОТК менеджер']);
+  const PROBLEM_STATES = new Set(['Проблема']);
+  const orderStates = orderStatesAgg
+    .map((r) => {
+      const state = r.stateName || '—';
+      const bucket: 'done' | 'inProgress' | 'problem' | 'unknown' =
+        r.stateName == null
+          ? 'unknown'
+          : DONE_STATES.has(r.stateName)
+            ? 'done'
+            : PROBLEM_STATES.has(r.stateName)
+              ? 'problem'
+              : 'inProgress';
+      return { state, count: r._count, bucket };
+    })
+    .sort((a, b) => b.count - a.count);
+  // Активные = в работе + проблемные. Завершённые и без состояния не считаем.
+  const activeOrdersCount = orderStates.reduce(
+    (s, r) => s + (r.bucket === 'inProgress' || r.bucket === 'problem' ? r.count : 0),
+    0,
+  );
+
   // Продажи по менеджерам
   const salesByManager = salesByMgr.map((m) => {
     const revenue = m._sum.itemsAmount || 0;
@@ -264,7 +340,7 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
       netCashFlow: totalCashIn - totalCashOut,
       avgCheck,
       txCount,
-      activeOrders,
+      activeOrders: activeOrdersCount,
       cashBalance: totalCashBalance,
       receivablesTotal: receivables.totals.debt,
       receivablesOverdue30: receivables.totals.overdue30Plus,
@@ -285,6 +361,8 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
       grossMargin: delta(report.grandTotal.grossMargin, prevReport.grandTotal.grossMargin),
     },
     series,
+    heroSpark,
+    salesDaily,
     expenseBreakdown,
     inflowBreakdown,
     topCustomers: topCust.map((c) => ({
@@ -307,5 +385,6 @@ export async function buildDashboard(input: PeriodInput): Promise<DashboardData>
     topDebtors,
     cashPositions,
     salesByManager,
+    orderStates,
   };
 }

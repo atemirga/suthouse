@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { format } from 'date-fns';
 import {
@@ -8,7 +8,7 @@ import {
   IconInfo, IconArrowRight, IconRefresh, IconBuilding,
   IconCash, IconCart, IconCoins, IconUsers, IconWarning, IconWallet, IconTrend,
 } from './Icons';
-import { MultiSeriesChart, PieBreakdown, HorizontalBar, ViewSwitcher } from './Charts';
+import { MultiSeriesChart, PieBreakdown, HorizontalBar, ViewSwitcher, RadialGauge } from './Charts';
 import Link from 'next/link';
 
 const fmt = (n: number) => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(n);
@@ -17,47 +17,177 @@ const fmtCompact = (n: number) => {
   if (abs >= 1e9) return (n / 1e9).toFixed(2) + ' млрд';
   if (abs >= 1e6) return (n / 1e6).toFixed(1) + ' млн';
   if (abs >= 1e3) return (n / 1e3).toFixed(0) + ' тыс';
-  return String(Math.round(n));
+  return Math.round(n).toLocaleString('ru-RU');
 };
+
+const REFRESH_INTERVAL_MS = 60_000;
+
+type SyncInfo = { status: string; finishedAt: string | null; startedAt: string } | null;
+
+function formatAgo(ms: number): string {
+  const sec = Math.floor(ms / 1000);
+  if (sec < 5) return 'только что';
+  if (sec < 60) return `${sec} сек назад`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} мин назад`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} ч назад`;
+  return `${Math.floor(hr / 24)} д назад`;
+}
 
 interface DashboardProps {
   initialData: any;
-  lastSync: { status: string; finishedAt: string | null; startedAt: string } | null;
+  lastSync: SyncInfo;
   unmappedCount: number;
 }
 
-export default function Dashboard({ initialData, lastSync, unmappedCount }: DashboardProps) {
+export default function Dashboard({ initialData, lastSync: initialLastSync, unmappedCount: initialUnmapped }: DashboardProps) {
   const sp = useSearchParams();
   const [data, setData] = useState(initialData);
   const [loading, setLoading] = useState(false);
+  const [lastSync, setLastSync] = useState<SyncInfo>(initialLastSync);
+  const [unmappedCount, setUnmappedCount] = useState(initialUnmapped);
+  const [fetchedAt, setFetchedAt] = useState<Date>(new Date());
+  const [now, setNow] = useState<Date>(new Date());
   const [revViewType, setRevViewType] = useState<'area' | 'bar' | 'line'>('area');
   const [expViewType, setExpViewType] = useState<'pie' | 'bar' | 'table'>('pie');
   const [topViewType, setTopViewType] = useState<'customers' | 'products'>('customers');
   const [cfViewType, setCfViewType] = useState<'bar' | 'line'>('bar');
+  const inFlight = useRef(false);
 
-  useEffect(() => {
+  const refresh = (signal?: AbortSignal) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     const params = new URLSearchParams(sp.toString());
     setLoading(true);
-    fetch('/api/dashboard?' + params.toString())
+    return fetch('/api/dashboard?' + params.toString(), { signal })
       .then((r) => r.json())
-      .then((d) => { if (!d.error) setData(d); })
-      .finally(() => setLoading(false));
+      .then((d) => {
+        if (d.error) return;
+        setData(d);
+        if (d.lastSync !== undefined) setLastSync(d.lastSync);
+        if (typeof d.unmappedCount === 'number') setUnmappedCount(d.unmappedCount);
+        setFetchedAt(d.fetchedAt ? new Date(d.fetchedAt) : new Date());
+      })
+      .catch((e) => { if (e?.name !== 'AbortError') throw e; })
+      .finally(() => { setLoading(false); inFlight.current = false; });
+  };
+
+  // Refetch on period change
+  useEffect(() => {
+    const ctl = new AbortController();
+    refresh(ctl.signal);
+    return () => ctl.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sp]);
+
+  // Auto-refresh every REFRESH_INTERVAL_MS, pause when tab hidden
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (document.visibilityState === 'visible') refresh();
+    }, REFRESH_INTERVAL_MS);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sp]);
+
+  // Refresh when tab regains focus (after being hidden)
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === 'visible' && Date.now() - fetchedAt.getTime() > 30_000) {
+        refresh();
+      }
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchedAt]);
+
+  // Tick "now" every 10s so "обновлено N сек назад" stays current
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 10_000);
+    return () => clearInterval(id);
+  }, []);
 
   if (!data) return <div className="text-center text-gray-500 py-12">Загрузка...</div>;
 
   const {
-    kpi, deltas, series, expenseBreakdown, inflowBreakdown,
+    kpi, deltas, series, heroSpark, salesDaily = [], expenseBreakdown, inflowBreakdown,
     topCustomers, topProducts,
     receivablesAging, topDebtors, cashPositions, salesByManager,
+    orderStates = [],
   } = data;
+  const orderStatesTotal = orderStates.reduce((s: number, r: any) => s + r.count, 0);
+  const orderStateColor = (b: string) =>
+    b === 'done' ? '#10b981' : b === 'inProgress' ? '#3b82f6' : b === 'problem' ? '#ef4444' : '#9ca3af';
+
+  const lastSyncDate = lastSync ? new Date(lastSync.finishedAt || lastSync.startedAt) : null;
+  const dataAgeMs = lastSyncDate ? now.getTime() - lastSyncDate.getTime() : null;
+  const fetchAgeMs = now.getTime() - fetchedAt.getTime();
 
   const expenseData = expenseBreakdown.map((e: any) => ({ name: e.label, value: e.amount }));
   const inflowData = inflowBreakdown.slice(0, 8).map((i: any) => ({ name: i.article.replace(/^\d+\.\d+\s+/, ''), value: i.amount }));
   const receivablesTotal = kpi.receivablesTotal;
 
+  // Мини-тренды для hero-карточек: дневные (heroSpark), с откатом на месячные series
+  const cashSpark = heroSpark?.cash?.length ? heroSpark.cash : series.map((s: any) => (s.cashIn || 0) - (s.cashOut || 0));
+  const revenueSpark = heroSpark?.revenue?.length ? heroSpark.revenue : series.map((s: any) => s.revenue || 0);
+  const profitSpark = heroSpark?.profit?.length ? heroSpark.profit : series.map((s: any) => s.netProfit || 0);
+
+  const isStale = dataAgeMs !== null && dataAgeMs > 45 * 60 * 1000;
+  const syncErrored = lastSync?.status === 'error';
+
   return (
     <div className="space-y-5">
+      {/* Свежесть данных + ручное обновление */}
+      <div className="flex items-center justify-between gap-3 flex-wrap text-xs">
+        <div className="flex items-center gap-2 text-gray-600">
+          <span
+            className={
+              'inline-block w-2 h-2 rounded-full ' +
+              (syncErrored ? 'bg-red-500' : isStale ? 'bg-amber-500' : 'bg-emerald-500 animate-pulse')
+            }
+            title={
+              syncErrored
+                ? 'Последняя синхронизация с 1С завершилась ошибкой'
+                : isStale
+                  ? 'Данные не обновлялись из 1С больше 45 минут'
+                  : 'Синхронизация с 1С идёт по расписанию'
+            }
+          />
+          {lastSyncDate ? (
+            <>
+              <span>
+                Данные из 1С на{' '}
+                <b className="text-gray-900">{format(lastSyncDate, 'dd.MM HH:mm')}</b>
+                {dataAgeMs !== null && (
+                  <span className="text-gray-500"> · {formatAgo(dataAgeMs)}</span>
+                )}
+              </span>
+            </>
+          ) : (
+            <span className="text-gray-400">Синхронизация ещё не запускалась</span>
+          )}
+          <span className="text-gray-300">·</span>
+          <span className="text-gray-500">
+            Экран обновлён {formatAgo(fetchAgeMs)}
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={() => refresh()}
+          disabled={loading}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed text-gray-700"
+          title="Обновить сейчас"
+        >
+          <IconRefresh
+            width={12}
+            height={12}
+            className={loading ? 'animate-spin' : ''}
+          />
+          {loading ? 'Обновляю…' : 'Обновить'}
+        </button>
+      </div>
+
       {/* Системные предупреждения */}
       {(unmappedCount > 0 || (lastSync && lastSync.status === 'error')) && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -65,7 +195,7 @@ export default function Dashboard({ initialData, lastSync, unmappedCount }: Dash
             <Link href="/settings/mapping" className="hint hover:bg-blue-100 transition-colors">
               <IconInfo className="hint-icon" />
               <div className="flex-1">
-                <b>{unmappedCount} статей ДДС</b> без категории ОПиУ — расходы могут не учитываться корректно.
+                <b>{fmt(unmappedCount)} статей ДДС</b> без категории ОПиУ — расходы могут не учитываться корректно.
               </div>
               <IconArrowRight width={16} height={16} className="text-blue-600 mt-0.5" />
             </Link>
@@ -83,39 +213,42 @@ export default function Dashboard({ initialData, lastSync, unmappedCount }: Dash
       )}
 
       {/* HERO KPIs — 4 главные карточки с градиентами */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 stagger">
         <HeroCard
           icon={<IconWallet width={20} height={20} />}
           label="Остаток денег"
-          value={fmtCompact(kpi.cashBalance)}
+          amount={kpi.cashBalance}
           suffix="₸"
           gradient="from-emerald-500 to-emerald-700"
+          spark={cashSpark}
           sub={`по ${cashPositions.length} ${declension(cashPositions.length, 'кассе', 'кассам', 'кассам')}`}
           link="/dds"
         />
         <HeroCard
           icon={<IconCart width={20} height={20} />}
           label="Выручка"
-          value={fmtCompact(kpi.revenue)}
+          amount={kpi.revenue}
           suffix="₸"
           gradient="from-blue-500 to-blue-700"
           delta={deltas.revenue}
+          spark={revenueSpark}
           link="/opiu"
         />
         <HeroCard
           icon={<IconTrend width={20} height={20} />}
           label="Чистая прибыль"
-          value={fmtCompact(kpi.netProfit)}
+          amount={kpi.netProfit}
           suffix="₸"
           gradient={kpi.netProfit >= 0 ? 'from-violet-500 to-violet-700' : 'from-rose-500 to-rose-700'}
           delta={deltas.netProfit}
+          spark={profitSpark}
           sub={(kpi.netMargin * 100).toFixed(1) + '% маржа'}
           link="/opiu"
         />
         <HeroCard
           icon={<IconCoins width={20} height={20} />}
           label="Долг клиентов"
-          value={fmtCompact(kpi.receivablesTotal)}
+          amount={kpi.receivablesTotal}
           suffix="₸"
           gradient={kpi.receivablesOverdue30 > kpi.receivablesTotal * 0.3 ? 'from-red-500 to-red-700' : 'from-amber-500 to-amber-700'}
           sub={`${kpi.receivablesCount} ${declension(kpi.receivablesCount, 'должник', 'должника', 'должников')} · ${fmtCompact(kpi.receivablesOverdue30)} ₸ просрочка 30+`}
@@ -124,12 +257,12 @@ export default function Dashboard({ initialData, lastSync, unmappedCount }: Dash
       </div>
 
       {/* MID KPIs — компактные показатели */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 stagger">
         <MiniKpi label="Валовая маржа" value={(kpi.grossMargin * 100).toFixed(1) + '%'} sub={fmtCompact(kpi.grossProfit) + ' ₸'} delta={deltas.grossMargin} />
         <MiniKpi label="EBITDA" value={fmtCompact(kpi.ebitda)} suffix="₸" sub={(kpi.ebitdaMargin * 100).toFixed(1) + '%'} />
         <MiniKpi label="Поступило" value={fmtCompact(kpi.cashIn)} suffix="₸" valueColor="text-emerald-700" />
         <MiniKpi label="Списано" value={fmtCompact(kpi.cashOut)} suffix="₸" valueColor="text-rose-700" />
-        <MiniKpi label="Сделок" value={String(kpi.txCount)} sub={fmtCompact(kpi.avgCheck) + ' ₸ ср.чек'} />
+        <MiniKpi label="Сделок" value={fmt(kpi.txCount)} sub={fmtCompact(kpi.avgCheck) + ' ₸ ср.чек'} />
         <MiniKpi
           label="Скидки выданы"
           value={fmtCompact(kpi.discountsGiven)}
@@ -138,12 +271,6 @@ export default function Dashboard({ initialData, lastSync, unmappedCount }: Dash
           valueColor="text-amber-700"
         />
       </div>
-
-      {loading && (
-        <div className="text-xs text-gray-500 flex items-center gap-2">
-          <IconRefresh className="animate-spin" width={12} height={12} /> Обновляю данные…
-        </div>
-      )}
 
       {/* Главный график динамики */}
       <div className="panel">
@@ -175,6 +302,42 @@ export default function Dashboard({ initialData, lastSync, unmappedCount }: Dash
             type={revViewType}
             height={290}
           />
+        </div>
+      </div>
+
+      {/* Маржинальность (радиальные gauge) + Heatmap продаж */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        <div className="panel anim-rise" style={{ animationDelay: '0.05s' }}>
+          <div className="panel-header">
+            <div className="panel-title">
+              <IconTrend width={14} height={14} />
+              Маржинальность
+              <Tooltip text="Валовая маржа, EBITDA-маржа и чистая маржа за период" />
+            </div>
+          </div>
+          <div className="p-3 grid grid-cols-3 gap-1">
+            <RadialGauge pct={kpi.grossMargin * 100} label="Валовая" color="#10b981" />
+            <RadialGauge pct={kpi.ebitdaMargin * 100} label="EBITDA" color="#8b5cf6" />
+            <RadialGauge
+              pct={kpi.netMargin * 100}
+              label="Чистая"
+              color={kpi.netMargin >= 0 ? '#3b82f6' : '#ef4444'}
+              sub={kpi.netMargin < 0 ? `${(kpi.netMargin * 100).toFixed(1)}%` : undefined}
+            />
+          </div>
+        </div>
+
+        <div className="panel anim-rise lg:col-span-2" style={{ animationDelay: '0.12s' }}>
+          <div className="panel-header">
+            <div className="panel-title">
+              <IconChart width={14} height={14} />
+              Карта продаж по дням
+              <Tooltip text="Дневная выручка за период: чем насыщеннее клетка, тем больше продаж в этот день" />
+            </div>
+          </div>
+          <div className="p-4">
+            <SalesHeatmap data={salesDaily} />
+          </div>
         </div>
       </div>
 
@@ -314,7 +477,7 @@ export default function Dashboard({ initialData, lastSync, unmappedCount }: Dash
             {expenseData.length === 0 ? (
               <div className="text-sm text-gray-500 py-8 text-center">Нет данных за период</div>
             ) : expViewType === 'pie' ? (
-              <PieBreakdown data={expenseData} />
+              <PieBreakdown data={expenseData} centerLabel="Расходы" />
             ) : expViewType === 'bar' ? (
               <HorizontalBar data={expenseData} />
             ) : (
@@ -352,6 +515,56 @@ export default function Dashboard({ initialData, lastSync, unmappedCount }: Dash
           </div>
         </div>
       </div>
+
+      {/* Заказы по статусам */}
+      {orderStatesTotal > 0 && (
+        <div className="panel">
+          <div className="panel-header">
+            <div className="panel-title">
+              <IconCart width={14} height={14} />
+              Заказы покупателей — статусы за период
+              <Tooltip text="Состояния заказов из 1С (Catalog_СостоянияЗаказовПокупателей). «Активные» = в работе + проблемные." />
+            </div>
+            <div className="text-xs text-gray-500">Всего {orderStatesTotal}</div>
+          </div>
+          <div className="p-4 space-y-3">
+            <div className="flex h-3 rounded-full overflow-hidden bg-gray-100">
+              {orderStates.map((r: any) => {
+                const pct = orderStatesTotal > 0 ? (r.count / orderStatesTotal) * 100 : 0;
+                if (pct === 0) return null;
+                return (
+                  <div
+                    key={r.state}
+                    style={{ width: `${pct}%`, background: orderStateColor(r.bucket) }}
+                    title={`${r.state}: ${r.count} (${pct.toFixed(1)}%)`}
+                  />
+                );
+              })}
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+              {orderStates.map((r: any) => {
+                const pct = orderStatesTotal > 0 ? (r.count / orderStatesTotal) * 100 : 0;
+                return (
+                  <div
+                    key={r.state}
+                    className="flex items-center gap-2 px-2 py-1.5 rounded-md border border-gray-100 bg-white"
+                  >
+                    <span
+                      className="w-2 h-2 rounded-full flex-shrink-0"
+                      style={{ background: orderStateColor(r.bucket) }}
+                    />
+                    <span className="text-xs flex-1 truncate" title={r.state}>{r.state}</span>
+                    <span className="text-xs font-semibold tabular-nums">{fmt(r.count)}</span>
+                    <span className="text-[10px] text-gray-400 tabular-nums w-9 text-right">
+                      {pct.toFixed(0)}%
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Продажи по менеджерам */}
       {salesByManager.length > 0 && (
@@ -430,7 +643,7 @@ export default function Dashboard({ initialData, lastSync, unmappedCount }: Dash
                     <td className="text-xs">{row.name}</td>
                     <td className="num">{fmt(row.revenue)}</td>
                     {topViewType === 'customers'
-                      ? <td className="num text-xs text-gray-500">{row.orders}</td>
+                      ? <td className="num text-xs text-gray-500">{fmt(row.orders)}</td>
                       : <td className="num text-xs"><span className={row.margin > 0 ? 'text-green-700' : 'text-red-700'}>{(row.margin * 100).toFixed(1)}%</span></td>}
                   </tr>
                 ))}
@@ -487,11 +700,12 @@ export default function Dashboard({ initialData, lastSync, unmappedCount }: Dash
           </div>
           <div>
             <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">Активных заказов</div>
-            <div className="text-lg font-semibold">{kpi.activeOrders}</div>
+            <div className="text-lg font-semibold">{fmt(kpi.activeOrders)}</div>
+            <div className="text-[11px] text-gray-500">в работе и проблемных за период</div>
           </div>
           <div>
             <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">Неразмеченных статей</div>
-            <div className={'text-lg font-semibold ' + (unmappedCount > 0 ? 'text-amber-600' : 'text-green-600')}>{unmappedCount}</div>
+            <div className={'text-lg font-semibold ' + (unmappedCount > 0 ? 'text-amber-600' : 'text-green-600')}>{fmt(unmappedCount)}</div>
           </div>
         </div>
       </div>
@@ -499,30 +713,117 @@ export default function Dashboard({ initialData, lastSync, unmappedCount }: Dash
   );
 }
 
+// Плавный счётчик от 0 до target (count-up при появлении карточки)
+function useCountUp(target: number, durationMs = 900): number {
+  const [val, setVal] = useState(0);
+  const fromRef = useRef(0);
+  const rafRef = useRef<number | null>(null);
+  useEffect(() => {
+    const from = fromRef.current;
+    let start: number | null = null;
+    const step = (ts: number) => {
+      if (start === null) start = ts;
+      const t = Math.min(1, (ts - start) / durationMs);
+      const eased = 1 - Math.pow(1 - t, 3); // easeOutCubic
+      const current = from + (target - from) * eased;
+      setVal(current);
+      if (t < 1) {
+        rafRef.current = requestAnimationFrame(step);
+      } else {
+        fromRef.current = target;
+      }
+    };
+    rafRef.current = requestAnimationFrame(step);
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    };
+  }, [target, durationMs]);
+  return val;
+}
+
+// Мини-спарклайн на чистом SVG: area-glow заливка + линия (wipe-анимация) + точка на конце
+function Sparkline({ data, className = '' }: { data: number[]; className?: string }) {
+  const uid = useId().replace(/:/g, '');
+  if (!data || data.length < 2) return null;
+  const w = 100;
+  const h = 30;
+  const pad = 3; // чтобы линия и точка не обрезались сверху/снизу
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const xy = data.map((v, i) => ({
+    x: (i / (data.length - 1)) * w,
+    y: pad + (h - 2 * pad) - ((v - min) / range) * (h - 2 * pad),
+  }));
+  const line = xy.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+  const area = `${line} ${w},${h} 0,${h}`;
+  const last = xy[xy.length - 1];
+  return (
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      preserveAspectRatio="none"
+      className={`w-full h-8 overflow-visible ${className}`}
+      aria-hidden="true"
+    >
+      <defs>
+        <linearGradient id={`sg-${uid}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="currentColor" stopOpacity={0.35} />
+          <stop offset="100%" stopColor="currentColor" stopOpacity={0} />
+        </linearGradient>
+      </defs>
+      <g className="spark-wipe">
+        <polygon points={area} fill={`url(#sg-${uid})`} className="spark-fill" />
+        <polyline
+          points={line}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          className="opacity-90"
+          vectorEffect="non-scaling-stroke"
+        />
+      </g>
+      <circle
+        cx={last.x}
+        cy={last.y}
+        r={2.4}
+        fill="#fff"
+        stroke="currentColor"
+        strokeWidth={1.5}
+        className="spark-dot"
+        vectorEffect="non-scaling-stroke"
+      />
+    </svg>
+  );
+}
+
 function HeroCard({
-  icon, label, value, suffix, sub, delta, gradient, link,
+  icon, label, amount, suffix, sub, delta, gradient, link, spark,
 }: {
   icon: React.ReactNode;
   label: string;
-  value: string;
+  amount: number;
   suffix?: string;
   sub?: string;
   delta?: number;
   gradient: string;
   link?: string;
+  spark?: number[];
 }) {
+  const animated = useCountUp(amount);
   const body = (
-    <div className={`bg-gradient-to-br ${gradient} text-white rounded-2xl p-5 shadow-sm relative overflow-hidden transition-transform ${link ? 'hover:scale-[1.01] hover:shadow-md cursor-pointer' : ''}`}>
+    <div className={`h-full flex flex-col bg-gradient-to-br ${gradient} text-white rounded-2xl p-5 shadow-sm relative overflow-hidden transition-transform ${link ? 'hover:scale-[1.01] hover:shadow-md cursor-pointer' : ''}`}>
       <div className="absolute top-0 right-0 opacity-10 -mr-4 -mt-4">
         <div className="w-28 h-28">{icon && <div style={{ transform: 'scale(5)' }}>{icon}</div>}</div>
       </div>
-      <div className="relative">
+      <div className="relative flex flex-col flex-1">
         <div className="flex items-center gap-2 mb-3 opacity-90">
           {icon}
           <div className="text-xs font-medium uppercase tracking-wider">{label}</div>
         </div>
         <div className="text-3xl font-bold tabular-nums">
-          {value}{suffix && <span className="text-lg font-semibold opacity-70 ml-1">{suffix}</span>}
+          {fmtCompact(animated)}{suffix && <span className="text-lg font-semibold opacity-70 ml-1">{suffix}</span>}
         </div>
         {sub && <div className="text-xs opacity-80 mt-1">{sub}</div>}
         {delta !== undefined && Math.abs(delta) > 0.5 && (
@@ -531,10 +832,14 @@ function HeroCard({
             {Math.abs(delta).toFixed(1)}% к пред.
           </div>
         )}
+        {/* Спарклайн всегда прижат к низу; место резервируется даже без него — карточки равной высоты */}
+        <div className="mt-auto pt-3 -mb-1 h-8">
+          {spark && spark.length >= 2 && <Sparkline data={spark} />}
+        </div>
       </div>
     </div>
   );
-  return link ? <Link href={link}>{body}</Link> : body;
+  return link ? <Link href={link} className="block h-full">{body}</Link> : body;
 }
 
 function MiniKpi({
@@ -590,6 +895,90 @@ function CategoryTable({ data }: { data: { name: string; value: number }[] }) {
         ))}
       </tbody>
     </table>
+  );
+}
+
+// Календарь дневной выручки: 7 колонок (Пн–Вс), клетки окрашены по интенсивности продаж
+function SalesHeatmap({ data }: { data: { date: string; revenue: number }[] }) {
+  if (!data || data.length === 0) {
+    return <div className="text-sm text-gray-500 py-8 text-center">Нет данных за период</div>;
+  }
+  const max = Math.max(...data.map((d) => d.revenue), 1);
+  const total = data.reduce((s, d) => s + d.revenue, 0);
+  const best = data.reduce((a, b) => (b.revenue > a.revenue ? b : a), data[0]);
+  const avg = total / data.length;
+
+  const parse = (iso: string) => {
+    const [y, m, d] = iso.split('-').map(Number);
+    return { y, m, d, dow: (new Date(y, m - 1, d).getDay() + 6) % 7 }; // dow: 0 = Пн
+  };
+  const firstOffset = parse(data[0].date).dow;
+  const fmtDate = (iso: string) => { const [, m, d] = iso.split('-'); return `${d}.${m}`; };
+
+  // 0 = нет продаж, 1..4 — растущая насыщенность зелёного
+  const level = (rev: number) => {
+    if (rev <= 0) return 0;
+    const t = rev / max;
+    return t >= 0.75 ? 4 : t >= 0.5 ? 3 : t >= 0.25 ? 2 : 1;
+  };
+  const BG = ['#f8fafc', '#dcfce7', '#86efac', '#22c55e', '#15803d'];
+  const FG = ['#94a3b8', '#166534', '#14532d', '#ffffff', '#ffffff'];
+  const dowLabels = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+
+  return (
+    <div>
+      {/* Сводка */}
+      <div className="grid grid-cols-3 gap-2 mb-4">
+        {[
+          { l: 'Всего за период', v: fmtCompact(total) + ' ₸' },
+          { l: 'В среднем в день', v: fmtCompact(avg) + ' ₸' },
+          { l: 'Лучший день', v: `${fmtDate(best.date)} · ${fmtCompact(best.revenue)}` },
+        ].map((s) => (
+          <div key={s.l} className="bg-gray-50 rounded-lg px-2.5 py-1.5">
+            <div className="text-[10px] text-gray-500 uppercase tracking-wider">{s.l}</div>
+            <div className="text-sm font-bold tabular-nums text-gray-900">{s.v}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Заголовки дней недели */}
+      <div className="grid grid-cols-7 gap-1.5 mb-1.5">
+        {dowLabels.map((l) => (
+          <div key={l} className="text-[10px] text-center text-gray-400 font-medium uppercase">{l}</div>
+        ))}
+      </div>
+
+      {/* Сетка-календарь */}
+      <div className="grid grid-cols-7 gap-1.5">
+        {Array.from({ length: firstOffset }).map((_, i) => <div key={'pad' + i} />)}
+        {data.map((d) => {
+          const lv = level(d.revenue);
+          const day = parse(d.date).d;
+          return (
+            <div
+              key={d.date}
+              className="rounded-lg p-1.5 flex flex-col justify-between h-14 sm:h-16 transition-transform hover:scale-[1.06] hover:ring-2 hover:ring-emerald-300 cursor-default"
+              style={{ background: BG[lv], color: FG[lv] }}
+              title={`${fmtDate(d.date)}: ${fmt(d.revenue)} ₸`}
+            >
+              <div className="text-[11px] font-semibold opacity-80 leading-none">{day}</div>
+              <div className="text-[10px] sm:text-[11px] font-bold tabular-nums leading-tight text-right">
+                {d.revenue > 0 ? fmtCompact(d.revenue) : ''}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Легенда */}
+      <div className="flex items-center justify-end gap-1.5 mt-3 text-[10px] text-gray-400">
+        <span>меньше</span>
+        {BG.map((c) => (
+          <span key={c} className="w-[13px] h-[13px] rounded-[3px] inline-block border border-gray-200" style={{ background: c }} />
+        ))}
+        <span>больше</span>
+      </div>
+    </div>
   );
 }
 

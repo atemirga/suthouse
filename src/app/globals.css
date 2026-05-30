@@ -34,52 +34,59 @@ html, body {
 }
 
 /* Таблицы отчётов */
-table.report {
-  @apply w-full text-sm border-separate;
-  border-spacing: 0;
-}
-table.report th {
-  @apply text-left font-semibold text-gray-600 px-3 py-2.5 border-b border-gray-200 bg-gray-50 text-xs uppercase tracking-wider;
-}
-table.report td {
-  @apply px-3 py-2 border-b border-gray-100;
-}
-table.report tr:hover td {
-  @apply bg-brand-50/40;
-}
-table.report td.num {
-  @apply text-right tabular-nums;
-}
-.subtotal td {
-  @apply font-semibold bg-gray-50/80;
-}
-.total td {
-  @apply font-bold bg-gradient-to-r from-brand-100 to-brand-50 text-brand-900;
+@layer components {
+  table.report {
+    @apply min-w-full text-sm border-separate;
+    border-spacing: 0;
+  }
+  table.report th {
+    @apply text-left font-semibold text-gray-600 px-2 md:px-3 py-2.5 border-b border-gray-200 bg-gray-50 text-xs uppercase tracking-wider whitespace-nowrap;
+  }
+  table.report th[class~="text-right"] { text-align: right; }
+  table.report th[class~="text-center"] { text-align: center; }
+  table.report td {
+    @apply px-2 md:px-3 py-2 border-b border-gray-100;
+  }
+  table.report tr:hover td {
+    @apply bg-brand-50/40;
+  }
+  table.report td.num {
+    @apply text-right tabular-nums whitespace-nowrap;
+  }
+  .subtotal td {
+    @apply font-semibold bg-gray-50/80;
+  }
+  .total td {
+    @apply font-bold bg-gradient-to-r from-brand-100 to-brand-50 text-brand-900;
+  }
 }
 
 /* KPI карточки */
-.kpi-card {
-  @apply bg-white border border-gray-200 rounded-xl p-4 transition-all hover:border-brand-300 hover:shadow-sm;
-}
-.kpi-label {
-  @apply text-xs text-gray-500 mb-1.5 font-medium uppercase tracking-wider;
-}
-.kpi-value {
-  @apply text-2xl font-bold text-gray-900 tabular-nums;
-}
-.kpi-trend {
-  @apply text-xs mt-1 flex items-center gap-1;
-}
+@layer components {
+  .kpi-card {
+    @apply bg-white border border-gray-200 rounded-xl p-3 md:p-4 transition-all hover:border-brand-300 hover:shadow-sm;
+  }
+  .kpi-label {
+    @apply text-[10px] md:text-xs text-gray-500 mb-1.5 font-medium uppercase tracking-wider;
+  }
+  .kpi-value {
+    @apply text-lg md:text-2xl font-bold text-gray-900 tabular-nums;
+  }
+  .kpi-trend {
+    @apply text-xs mt-1 flex items-center gap-1;
+  }
 
-/* Карточки с заголовком */
-.panel {
-  @apply bg-white border border-gray-200 rounded-xl overflow-hidden;
-}
-.panel-header {
-  @apply px-4 py-3 border-b border-gray-200 flex items-center justify-between bg-white;
-}
-.panel-title {
-  @apply font-semibold text-gray-900 text-sm flex items-center gap-2;
+  /* Карточки с заголовком. overflow-hidden по дефолту (clip rounded corners),
+     но в @layer components — поэтому утилиты типа `overflow-auto` его переопределяют. */
+  .panel {
+    @apply bg-white border border-gray-200 rounded-xl overflow-hidden;
+  }
+  .panel-header {
+    @apply px-4 py-3 border-b border-gray-200 flex items-center justify-between bg-white;
+  }
+  .panel-title {
+    @apply font-semibold text-gray-900 text-sm flex items-center gap-2;
+  }
 }
 
 /* Toggle button group */
@@ -132,3 +139,37 @@ table.report td.num {
 .btn-primary { @apply bg-brand-600 text-white hover:bg-brand-700; }
 .btn-secondary { @apply bg-white border border-gray-300 text-gray-700 hover:bg-gray-50; }
 .btn-ghost { @apply text-gray-600 hover:bg-gray-100; }
+
+/* ───────────────── Wow-анимации дашборда ───────────────── */
+@keyframes riseIn {
+  from { opacity: 0; transform: translateY(14px) scale(0.985); }
+  to   { opacity: 1; transform: translateY(0)    scale(1); }
+}
+/* Каскадное появление блоков; задержка задаётся через style=animation-delay */
+.anim-rise {
+  opacity: 0;
+  animation: riseIn 0.55s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+/* Каскад прямых детей контейнера (hero-карточки, мини-KPI) */
+.stagger > * { opacity: 0; animation: riseIn 0.55s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
+.stagger > *:nth-child(1) { animation-delay: 0.04s; }
+.stagger > *:nth-child(2) { animation-delay: 0.10s; }
+.stagger > *:nth-child(3) { animation-delay: 0.16s; }
+.stagger > *:nth-child(4) { animation-delay: 0.22s; }
+.stagger > *:nth-child(5) { animation-delay: 0.28s; }
+.stagger > *:nth-child(6) { animation-delay: 0.34s; }
+
+/* Рисование спарклайна слева-направо через clip-path (устойчиво к масштабу SVG) */
+@keyframes wipeIn {
+  from { clip-path: inset(0 100% 0 0); }
+  to   { clip-path: inset(0 0 0 0); }
+}
+.spark-wipe { animation: wipeIn 1s cubic-bezier(0.4, 0, 0.2, 1) forwards; }
+@keyframes fadeInSoft { from { opacity: 0; } to { opacity: 1; } }
+.spark-fill { animation: fadeInSoft 1.3s ease-out forwards; }
+@keyframes popDot { 0% { opacity: 0; transform: scale(0); } 70% { transform: scale(1.4); } 100% { opacity: 1; transform: scale(1); } }
+.spark-dot { transform-origin: center; transform-box: fill-box; animation: popDot 0.4s ease-out 1s both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-rise, .spark-wipe, .spark-fill, .spark-dot, .stagger > * { animation: none; opacity: 1; clip-path: none; }
+}
