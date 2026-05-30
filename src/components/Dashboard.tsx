@@ -8,7 +8,7 @@ import {
   IconInfo, IconArrowRight, IconRefresh, IconBuilding,
   IconCash, IconCart, IconCoins, IconUsers, IconWarning, IconWallet, IconTrend,
 } from './Icons';
-import { MultiSeriesChart, PieBreakdown, HorizontalBar, ViewSwitcher, RadialGauge } from './Charts';
+import { MultiSeriesChart, PieBreakdown, HorizontalBar, ViewSwitcher } from './Charts';
 import Link from 'next/link';
 
 const fmt = (n: number) => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(n);
@@ -305,39 +305,17 @@ export default function Dashboard({ initialData, lastSync: initialLastSync, unma
         </div>
       </div>
 
-      {/* Маржинальность (радиальные gauge) + Heatmap продаж */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <div className="panel anim-rise" style={{ animationDelay: '0.05s' }}>
-          <div className="panel-header">
-            <div className="panel-title">
-              <IconTrend width={14} height={14} />
-              Маржинальность
-              <Tooltip text="Валовая маржа, EBITDA-маржа и чистая маржа за период" />
-            </div>
-          </div>
-          <div className="p-3 grid grid-cols-3 gap-1">
-            <RadialGauge pct={kpi.grossMargin * 100} label="Валовая" color="#10b981" />
-            <RadialGauge pct={kpi.ebitdaMargin * 100} label="EBITDA" color="#8b5cf6" />
-            <RadialGauge
-              pct={kpi.netMargin * 100}
-              label="Чистая"
-              color={kpi.netMargin >= 0 ? '#3b82f6' : '#ef4444'}
-              sub={kpi.netMargin < 0 ? `${(kpi.netMargin * 100).toFixed(1)}%` : undefined}
-            />
+      {/* Карта продаж по дням — на всю ширину */}
+      <div className="panel anim-rise" style={{ animationDelay: '0.08s' }}>
+        <div className="panel-header">
+          <div className="panel-title">
+            <IconChart width={14} height={14} />
+            Карта продаж по дням
+            <Tooltip text="Дневная выручка за период: чем насыщеннее клетка, тем больше продаж в этот день" />
           </div>
         </div>
-
-        <div className="panel anim-rise lg:col-span-2" style={{ animationDelay: '0.12s' }}>
-          <div className="panel-header">
-            <div className="panel-title">
-              <IconChart width={14} height={14} />
-              Карта продаж по дням
-              <Tooltip text="Дневная выручка за период: чем насыщеннее клетка, тем больше продаж в этот день" />
-            </div>
-          </div>
-          <div className="p-4">
-            <SalesHeatmap data={salesDaily} />
-          </div>
+        <div className="p-4">
+          <SalesHeatmap data={salesDaily} />
         </div>
       </div>
 
@@ -898,7 +876,8 @@ function CategoryTable({ data }: { data: { name: string; value: number }[] }) {
   );
 }
 
-// Календарь дневной выручки: 7 колонок (Пн–Вс), клетки окрашены по интенсивности продаж
+// Карта продаж: дни недели — по вертикали (7 строк), недели/дни месяца — по горизонтали.
+// Колонки-недели тянутся на всю ширину; на узких экранах — горизонтальный скролл.
 function SalesHeatmap({ data }: { data: { date: string; revenue: number }[] }) {
   if (!data || data.length === 0) {
     return <div className="text-sm text-gray-500 py-8 text-center">Нет данных за период</div>;
@@ -913,6 +892,7 @@ function SalesHeatmap({ data }: { data: { date: string; revenue: number }[] }) {
     return { y, m, d, dow: (new Date(y, m - 1, d).getDay() + 6) % 7 }; // dow: 0 = Пн
   };
   const firstOffset = parse(data[0].date).dow;
+  const numWeeks = Math.ceil((firstOffset + data.length) / 7);
   const fmtDate = (iso: string) => { const [, m, d] = iso.split('-'); return `${d}.${m}`; };
 
   // 0 = нет продаж, 1..4 — растущая насыщенность зелёного
@@ -924,57 +904,65 @@ function SalesHeatmap({ data }: { data: { date: string; revenue: number }[] }) {
   const BG = ['#f8fafc', '#dcfce7', '#86efac', '#22c55e', '#15803d'];
   const FG = ['#94a3b8', '#166534', '#14532d', '#ffffff', '#ffffff'];
   const dowLabels = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+  const ROWS = 'repeat(7, 2.1rem)';
 
   return (
     <div>
-      {/* Сводка */}
-      <div className="grid grid-cols-3 gap-2 mb-4">
+      {/* Сводка сверху (на мобиле — в столбик) */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-4">
         {[
           { l: 'Всего за период', v: fmtCompact(total) + ' ₸' },
           { l: 'В среднем в день', v: fmtCompact(avg) + ' ₸' },
-          { l: 'Лучший день', v: `${fmtDate(best.date)} · ${fmtCompact(best.revenue)}` },
+          { l: 'Лучший день', v: `${fmtDate(best.date)} · ${fmtCompact(best.revenue)} ₸` },
         ].map((s) => (
-          <div key={s.l} className="bg-gray-50 rounded-lg px-2.5 py-1.5">
+          <div key={s.l} className="bg-gray-50 rounded-lg px-3 py-2">
             <div className="text-[10px] text-gray-500 uppercase tracking-wider">{s.l}</div>
-            <div className="text-sm font-bold tabular-nums text-gray-900">{s.v}</div>
+            <div className="text-sm sm:text-base font-bold tabular-nums text-gray-900">{s.v}</div>
           </div>
         ))}
       </div>
 
-      {/* Заголовки дней недели */}
-      <div className="grid grid-cols-7 gap-1.5 mb-1.5">
-        {dowLabels.map((l) => (
-          <div key={l} className="text-[10px] text-center text-gray-400 font-medium uppercase">{l}</div>
-        ))}
-      </div>
-
-      {/* Сетка-календарь */}
-      <div className="grid grid-cols-7 gap-1.5">
-        {Array.from({ length: firstOffset }).map((_, i) => <div key={'pad' + i} />)}
-        {data.map((d) => {
-          const lv = level(d.revenue);
-          const day = parse(d.date).d;
-          return (
-            <div
-              key={d.date}
-              className="rounded-lg p-1.5 flex flex-col justify-between h-14 sm:h-16 transition-transform hover:scale-[1.06] hover:ring-2 hover:ring-emerald-300 cursor-default"
-              style={{ background: BG[lv], color: FG[lv] }}
-              title={`${fmtDate(d.date)}: ${fmt(d.revenue)} ₸`}
-            >
-              <div className="text-[11px] font-semibold opacity-80 leading-none">{day}</div>
-              <div className="text-[10px] sm:text-[11px] font-bold tabular-nums leading-tight text-right">
-                {d.revenue > 0 ? fmtCompact(d.revenue) : ''}
-              </div>
-            </div>
-          );
-        })}
+      {/* Развёрнутый календарь: дни недели слева вертикально, месяц — слева направо */}
+      <div className="overflow-x-auto pb-1 -mx-1 px-1">
+        <div className="flex gap-1">
+          {/* Подписи дней недели (вертикально) */}
+          <div className="grid shrink-0 gap-1 pr-1" style={{ gridTemplateRows: ROWS }}>
+            {dowLabels.map((l) => (
+              <div key={l} className="flex items-center text-[10px] text-gray-400 font-medium">{l}</div>
+            ))}
+          </div>
+          {/* Клетки: колонки-недели тянутся на всю ширину (мин. 40px для скролла на мобиле) */}
+          <div
+            className="grid flex-1 gap-1"
+            style={{ gridTemplateColumns: `repeat(${numWeeks}, minmax(40px, 1fr))`, gridTemplateRows: ROWS, gridAutoFlow: 'column' }}
+          >
+            {Array.from({ length: firstOffset }).map((_, i) => <div key={'pad' + i} />)}
+            {data.map((d) => {
+              const lv = level(d.revenue);
+              const day = parse(d.date).d;
+              return (
+                <div
+                  key={d.date}
+                  className="rounded-md px-1.5 py-1 flex flex-col justify-between overflow-hidden transition-transform hover:scale-[1.04] hover:ring-2 hover:ring-emerald-300 cursor-default"
+                  style={{ background: BG[lv], color: FG[lv] }}
+                  title={`${fmtDate(d.date)}: ${fmt(d.revenue)} ₸`}
+                >
+                  <span className="text-[10px] font-semibold opacity-80 leading-none">{day}</span>
+                  <span className="text-[9px] sm:text-[10px] font-bold tabular-nums leading-none text-right truncate">
+                    {d.revenue > 0 ? fmtCompact(d.revenue) : ''}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
       </div>
 
       {/* Легенда */}
-      <div className="flex items-center justify-end gap-1.5 mt-3 text-[10px] text-gray-400">
+      <div className="flex items-center gap-1.5 mt-3 text-[10px] text-gray-400">
         <span>меньше</span>
         {BG.map((c) => (
-          <span key={c} className="w-[13px] h-[13px] rounded-[3px] inline-block border border-gray-200" style={{ background: c }} />
+          <span key={c} className="w-3.5 h-3.5 rounded-[3px] inline-block border border-gray-200" style={{ background: c }} />
         ))}
         <span>больше</span>
       </div>
