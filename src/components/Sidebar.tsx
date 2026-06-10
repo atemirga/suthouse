@@ -1,8 +1,9 @@
 'use client';
 
+import '@/lib/presentation'; // режим презентации: маскировка цифр на клиенте
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useState, useMemo } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import {
   IconHome,
   IconOpiu,
@@ -43,6 +44,7 @@ const groups: NavGroup[] = [
       { href: '/dds', label: 'ДДС-Отчёт', icon: IconDds, hint: 'Операционная / Инвестиционная / Финансовая' },
       { href: '/dds/by-kassa', label: 'ДДС по кассам', icon: IconCash, hint: 'Остатки и обороты по каждой кассе' },
       { href: '/payments', label: 'Платежи', icon: IconCoins, hint: 'Реестр банковских и кассовых платежей' },
+      { href: '/vypiska', label: 'Сверка выписки', icon: IconCash, hint: 'Сверка выписки Kaspi с оплатами в 1С по дням' },
     ],
   },
   {
@@ -61,6 +63,7 @@ const groups: NavGroup[] = [
     icon: IconCart,
     items: [
       { href: '/sales/abc', label: 'ABC-анализ', icon: IconCart, hint: 'A/B/C по выручке и марже' },
+      { href: '/sales/xyz', label: 'XYZ-анализ', icon: IconCart, hint: 'Стабильность спроса по CV' },
       { href: '/sales/by-category', label: 'По категориям', icon: IconCart, hint: 'Категории номенклатуры' },
       { href: '/sales/by-sku', label: 'По SKU и менеджерам', icon: IconCart, hint: 'Позиции × менеджер' },
       { href: '/sales/funnel', label: 'Воронка продаж', icon: IconUsers, hint: 'По источникам привлечения' },
@@ -83,6 +86,7 @@ const groups: NavGroup[] = [
     label: 'Расчёты',
     icon: IconCoins,
     items: [
+      { href: '/balance', label: 'Баланс', icon: IconPie, hint: 'Активы / пассивы / капитал на дату' },
       { href: '/receivables', label: 'Дебиторка', icon: IconCoins, hint: 'Долги с разбивкой по возрасту (AR Aging)' },
       { href: '/payables', label: 'Кредиторка', icon: IconCoins, hint: 'Наши долги поставщикам' },
     ],
@@ -118,6 +122,10 @@ export default function Sidebar({ user }: { user: string }) {
   }, [pathname]);
 
   const [openGroups, setOpenGroups] = useState<Set<string>>(initialOpen);
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  // Закрываем drawer при навигации.
+  useEffect(() => { setMobileOpen(false); }, [pathname]);
 
   function toggle(id: string) {
     const next = new Set(openGroups);
@@ -126,7 +134,45 @@ export default function Sidebar({ user }: { user: string }) {
   }
 
   return (
-    <aside className="w-64 bg-white border-r border-gray-200 flex flex-col sticky top-0 h-screen">
+    <>
+      {/* Mobile top bar with hamburger */}
+      <div className="md:hidden fixed top-0 left-0 right-0 h-12 bg-white border-b border-gray-200 flex items-center justify-between px-3 z-30">
+        <button
+          onClick={() => setMobileOpen(true)}
+          className="p-1.5 -ml-1.5 rounded-md hover:bg-gray-100"
+          aria-label="Меню"
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="3" y1="6" x2="21" y2="6" />
+            <line x1="3" y1="12" x2="21" y2="12" />
+            <line x1="3" y1="18" x2="21" y2="18" />
+          </svg>
+        </button>
+        <div className="flex items-center gap-2">
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center text-white font-bold text-xs shadow-sm">
+            S
+          </div>
+          <div className="text-sm font-bold text-gray-900">SUT HOUSE</div>
+        </div>
+        <div className="w-7" />
+      </div>
+
+      {/* Backdrop on mobile when drawer is open */}
+      {mobileOpen && (
+        <div
+          className="md:hidden fixed inset-0 bg-black/40 z-40"
+          onClick={() => setMobileOpen(false)}
+        />
+      )}
+
+    <aside className={
+      'bg-white border-r border-gray-200 flex flex-col w-64 ' +
+      // На desktop — обычный sticky сайдбар.
+      'md:sticky md:top-0 md:h-screen ' +
+      // На мобиле — fixed drawer слева, выезжает по toggle.
+      'fixed inset-y-0 left-0 z-40 transition-transform duration-200 ' +
+      (mobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0')
+    }>
       <div className="px-5 py-4 border-b border-gray-200">
         <div className="flex items-center gap-2">
           <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center text-white font-bold shadow-sm">
@@ -199,6 +245,7 @@ export default function Sidebar({ user }: { user: string }) {
         <div className="text-[10px] text-gray-400 px-2 pt-1">v0.3 · 1С:УНФ KZ 1.6</div>
       </div>
     </aside>
+    </>
   );
 }
 

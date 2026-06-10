@@ -1,0 +1,142 @@
+[
+  {
+    "name": "use_api",
+    "description": "ПЕРВЫЙ ВЫБОР для всех управленческих запросов. Вызывает готовый GET-эндпойнт Next.js приложения Suthouse — у нас уже посчитаны ОПиУ, ДДС, дашборд, продажи, дебиторка, остатки и т.д. Полный список endpoint в knowledge/api_catalog.md (загружен в system prompt). Возвращает JSON; затем сформулируй короткий человеческий ответ на русском, не дублируя сырую структуру. Используй ВСЕГДА, когда вопрос можно покрыть готовым отчётом — это быстрее и точнее, чем считать через query_db или 1С.",
+    "write": false,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "description": "Относительный путь без префикса /api/. Примеры: 'dashboard', 'opiu', 'dds', 'dds/by-kassa', 'balance', 'receivables', 'payables', 'payments', 'expenses', 'discounts', 'sales/abc', 'sales/by-sku', 'sales/by-category', 'sales/by-manager', 'sales/by-manager/details', 'sales/funnel', 'sales/funnel/details', 'sales/plan-fact', 'sales/plans', 'packers', 'packers/pending', 'inventory/balances', 'accruals', 'fixed-assets', 'adjustments', 'articles', 'anomalies', 'sync/status', 'sync/cron-status'."
+        },
+        "query": {
+          "type": "object",
+          "description": "Query-параметры. Самые частые: from (YYYY-MM-DD), to (YYYY-MM-DD), granularity (day|week|month), asOf (YYYY-MM-DD), drill, limit. См. описание конкретного endpoint в api_catalog. Передавай ТОЛЬКО те поля, которые поддерживает endpoint.",
+          "additionalProperties": true
+        }
+      },
+      "required": ["endpoint"]
+    }
+  },
+  {
+    "name": "query_db",
+    "description": "ВТОРОЙ ВЫБОР — прямой read-only SELECT в Postgres проекта Suthouse, если готового API нет или нужна нестандартная агрегация. БД хранит уже синхронизированные из 1С документы и справочники (схема в knowledge/db_schema.md). Запрос должен быть SELECT/WITH, без точки с запятой, без INSERT/UPDATE/DELETE/DDL. Параметры — через `%(name)s` и поле args. Максимум 1000 строк за раз.",
+    "write": false,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "sql": {
+          "type": "string",
+          "description": "SQL-запрос. Только SELECT или WITH. Без точки с запятой. Параметры подставляй через %(name)s."
+        },
+        "args": {
+          "type": "object",
+          "description": "Словарь параметров для подстановки в SQL. Пример: {\"from\": \"2026-05-01\", \"to\": \"2026-05-31\"}.",
+          "additionalProperties": true
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Максимум строк, default=100, max=1000."
+        }
+      },
+      "required": ["sql"]
+    }
+  },
+  {
+    "name": "find_article",
+    "description": "Поиск статьи ДДС/ОПиУ по слову (например 'аренда', 'маркетинг', 'налог', '1.06'). Возвращает id+name+opiuCategory. Используй когда пользователь упомянул КОНКРЕТНУЮ статью или категорию расходов, и нужно подставить article=<id> в use_api(endpoint='dds') или use_api(endpoint='expenses'). НЕ используй когда вопрос про общую категорию ОПиУ (revenue/cogs/payroll/...) — там сразу use_api(endpoint='opiu') или 'expenses'.",
+    "write": false,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "keyword": {"type": "string", "description": "Слово или часть имени статьи (по-русски). Регистр не важен."}
+      },
+      "required": ["keyword"]
+    }
+  },
+  {
+    "name": "find_kontragent",
+    "description": "Поиск контрагента (клиента/поставщика) по слову. Используй когда пользователь назвал имя клиента, и нужно подставить kontragent=<id> в use_api(endpoint='dds') / 'payments' / 'receivables'. Если просто «продажи клиенту X» — лучше используй query_db с ILIKE по Kontragent.name, без отдельного поиска.",
+    "write": false,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "keyword": {"type": "string", "description": "Часть имени контрагента."}
+      },
+      "required": ["keyword"]
+    }
+  },
+  {
+    "name": "describe_db",
+    "description": "Вспомогательный инструмент: список всех таблиц в Postgres или описание колонок одной таблицы. Используй ЕСЛИ не уверен, какая колонка есть в таблице — лучше один раз спросить describe_db, чем гадать. После уточнения схемы вызывай query_db.",
+    "write": false,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "table": {
+          "type": "string",
+          "description": "Имя таблицы. Если не передано — вернёт список всех таблиц."
+        }
+      }
+    }
+  },
+  {
+    "name": "report_dds",
+    "description": "ТРЕТИЙ ВЫБОР (legacy) — полный отчёт ДДС напрямую из 1С (4 типа документов + статьи). Используй ТОЛЬКО если use_api с endpoint 'dds' не подходит (например, БД ещё не синхронизирована, или нужны самые-самые свежие данные минута-в-минуту). По умолчанию предпочитай use_api endpoint='dds'.",
+    "write": false,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "date_from": {"type": "string", "description": "Начало периода YYYY-MM-DD."},
+        "date_to": {"type": "string", "description": "Конец периода YYYY-MM-DD ВКЛЮЧИТЕЛЬНО."}
+      }
+    }
+  },
+  {
+    "name": "find_entity",
+    "description": "Поиск имени сущности 1С (документа/каталога/регистра) по ключевому слову. Используй ТОЛЬКО если собираешься звать query_1c — для use_api/query_db не нужно.",
+    "write": false,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "keyword": {"type": "string", "description": "Ключевое слово или часть имени сущности (по-русски)."},
+        "kind": {"type": "string", "enum": ["Document", "Catalog", "AccumulationRegister", "InformationRegister"], "description": "Опционально: ограничить класс сущностей."}
+      },
+      "required": ["keyword"]
+    }
+  },
+  {
+    "name": "query_1c",
+    "description": "ПОСЛЕДНИЙ ВЫБОР (fallback) — прямой OData-запрос в 1С УНФ. Используй ТОЛЬКО когда: (а) ни один endpoint use_api не подходит, (б) нужная таблица не синкается в Postgres, ИЛИ (в) пользователь явно просит «свежее из 1С». 99% запросов закрываются use_api — НЕ ходи сюда без необходимости.",
+    "write": false,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "entity": {
+          "type": "string",
+          "enum": [
+            "Document_ПоступлениеВКассу",
+            "Document_ПоступлениеНаСчет",
+            "Document_РасходИзКассы",
+            "Document_РасходСоСчета",
+            "Document_ПеремещениеДС",
+            "Document_РасходнаяНакладная",
+            "Document_ПриходнаяНакладная",
+            "AccumulationRegister_ДенежныеСредства",
+            "AccumulationRegister_РасчетыСПокупателями",
+            "AccumulationRegister_РасчетыСПоставщиками"
+          ]
+        },
+        "date_from": {"type": "string", "description": "YYYY-MM-DD."},
+        "date_to": {"type": "string", "description": "YYYY-MM-DD ВКЛЮЧИТЕЛЬНО."},
+        "as_of_date": {"type": "string", "description": "YYYY-MM-DD — для AccumulationRegister_*."},
+        "group_by": {"type": "string", "description": "Контрагент_Key | БанковскийСчетКасса."},
+        "top_n": {"type": "integer"},
+        "filter_contragent": {"type": "string"},
+        "filter_account": {"type": "string"}
+      },
+      "required": ["entity"]
+    }
+  }
+]

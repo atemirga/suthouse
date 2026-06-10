@@ -9,7 +9,7 @@ const fmtCompact = (n: number) => {
   if (abs >= 1e9) return (n / 1e9).toFixed(2) + ' млрд';
   if (abs >= 1e6) return (n / 1e6).toFixed(1) + ' млн';
   if (abs >= 1e3) return (n / 1e3).toFixed(0) + ' тыс';
-  return String(Math.round(n));
+  return Math.round(n).toLocaleString('ru-RU');
 };
 
 interface BucketDef { key: string; label: string; color: string }
@@ -43,7 +43,7 @@ export default function PayablesClient({
     <div className="space-y-5">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <KpiBlock label="Мы должны" value={fmtCompact(totalDebt)} suffix="₸" color="red" big />
-        <KpiBlock label="Поставщиков" value={String(initialData.totals.creditorCount)} color="amber" />
+        <KpiBlock label="Поставщиков" value={initialData.totals.creditorCount.toLocaleString('ru-RU')} color="amber" />
         <KpiBlock label="Просрочка 30+ дн" value={fmtCompact(initialData.totals.overdue30Plus)} suffix="₸" color="red"
                   sub={totalDebt > 0 ? ((initialData.totals.overdue30Plus / totalDebt) * 100).toFixed(1) + '% от долга' : ''} />
         <KpiBlock label="Авансы выданные" value={fmtCompact(initialData.totals.prepayments)} suffix="₸" color="green" />

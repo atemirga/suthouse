@@ -1,6 +1,6 @@
 import { fetchAllOData, dateFilter, combineFilters, POSTED_FILTER } from '@/lib/odata';
 import { prisma } from '@/lib/db';
-import { normalizeName, emptyKey, parseDate, num, syncSinceDate } from './utils';
+import { normalizeName, emptyKey, parseDate, num, syncSinceDate, computeStaleIds } from './utils';
 
 interface ZakupkaRow {
   Ref_Key: string;
@@ -100,7 +100,19 @@ export async function syncZakupki(daysBack?: number) {
     });
     count++;
   }
-  return count;
+
+  // ── Purge stale: распроведённые/удалённые в 1С закупки убираем из БД, иначе
+  //    они завышают запасы/себестоимость/кредиторку (см. [[sync-stale-deleted-docs]]). ──
+  const fetchedIds = rows.map((r) => r.Ref_Key).filter((id) => !emptyKey(id));
+  const dbIds = await prisma.zakupka.findMany({ where: { date: { gte: since } }, select: { id: true } });
+  const stale = computeStaleIds(dbIds.map((d) => d.id), fetchedIds);
+  let purged = 0;
+  if (stale.length) {
+    await prisma.zakupkaItem.deleteMany({ where: { zakupkaId: { in: stale } } });
+    purged = (await prisma.zakupka.deleteMany({ where: { id: { in: stale } } })).count;
+  }
+
+  return { upserted: count, purged };
 }
 
 // Глобальный словарь {nomenclatureId → последняя закупочная цена}

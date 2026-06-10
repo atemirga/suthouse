@@ -8,6 +8,8 @@ import { syncWriteOffs, syncCapitalizations } from './inventory';
 import { syncMonthCloses } from './month-close';
 import { recomputeFifoCosts } from './fifo';
 import { syncFactCost } from './fact-cost';
+import { syncOpeningBalances } from './openings';
+import { syncSalesPlans } from './sales-plans';
 import { syncSinceDate } from './utils';
 
 export interface SyncResult {
@@ -63,6 +65,26 @@ export async function runFullSync(opts: { daysBack?: number; skipCatalogs?: bool
     details.orders = orders.status === 'fulfilled' ? orders.value : { error: (orders as any).reason?.message || String((orders as any).reason) };
     details.capitalizations = capitalizations.status === 'fulfilled' ? capitalizations.value : { error: (capitalizations as any).reason?.message || String((capitalizations as any).reason) };
     details.monthCloses = monthCloses.status === 'fulfilled' ? monthCloses.value : { error: (monthCloses as any).reason?.message || String((monthCloses as any).reason) };
+
+    // Opening balances пересчитываем последним шагом — после того как все
+    // документы синхронизированы и MIN(date) актуальна. 1С может задним числом
+    // проводить документы, что меняет исторические балансы регистра — opening
+    // должен подтягиваться каждый тик, иначе ДДС-по-кассам разъезжается
+    // с 1С (см. [[dds-by-kassa-transfers]]).
+    try {
+      details.openings = await syncOpeningBalances();
+    } catch (e: any) {
+      details.openings = { error: e?.message || String(e) };
+    }
+
+    // План продаж — best-effort. Если в этой конфигурации 1С нет такого
+    // документа (или ресурс по другому именованию), вернёт noResource:true,
+    // ручные планы из /sales/plans продолжают работать.
+    try {
+      details.salesPlans = await syncSalesPlans();
+    } catch (e: any) {
+      details.salesPlans = { error: e?.message || String(e) };
+    }
 
     const durationMs = Date.now() - t0;
     await prisma.syncLog.update({

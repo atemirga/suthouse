@@ -17,3 +17,17 @@ npm-debug.log*
 
 next-env.d.ts
 .turbo/
+
+# Google Service Account key (secret)
+.gcp-amort-sa.json
+
+# Банковские выписки — чувствительные финансовые данные
+/Выписка_по_счету_*.pdf
+/Выписка_по_счету_*.xlsx
+
+# Локальные настройки Claude Code
+.claude/
+
+# Локальные БД и кэш Telegram-бота
+*.db
+suthouse-bot/.cache/

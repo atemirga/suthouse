@@ -1,6 +1,6 @@
 import { fetchAllOData, dateFilter, combineFilters, POSTED_FILTER } from '@/lib/odata';
 import { prisma } from '@/lib/db';
-import { normalizeName, emptyKey, parseDate, num, syncSinceDate } from './utils';
+import { normalizeName, emptyKey, parseDate, num, syncSinceDate, computeStaleIds } from './utils';
 
 interface DdsRow {
   Ref_Key: string;
@@ -20,6 +20,13 @@ interface DdsRow {
   КассаПолучатель_Key?: string;
   СчетОрганизации_Key?: string;
   БанковскийСчет_Key?: string;  // в УНФ KZ называется так
+  БанковскийСчетПолучатель_Key?: string; // для ПеремещениеДС bank-side
+  // Для ПереводНаДругойСчет — это наш же счёт-получатель
+  // (Owner=Catalog_Организации, проверено через 1С). Имя поля вводит в
+  // заблуждение — это не контрагентский счёт.
+  СчетКонтрагента_Key?: string;
+  ТипДенежныхСредств?: string;             // Наличные | Безналичные (источник)
+  ТипДенежныхСредствПолучатель?: string;   // Наличные | Безналичные (получатель)
   Комментарий?: string;
   НазначениеПлатежа?: string;
   ПериодРегистрации?: string; // для ЗП-выплат — месяц начисления (accrual)
@@ -110,9 +117,10 @@ async function fetchWithAliases(resource: string, opts: any): Promise<DdsRow[]> 
   throw lastErr || new Error(`No alias worked for ${resource}`);
 }
 
-async function syncOneDocType(cfg: DocConfig, since: Date, maps: MapsCache): Promise<number> {
+async function syncOneDocType(cfg: DocConfig, since: Date, maps: MapsCache): Promise<{ count: number; ids: string[] }> {
   const filter = combineFilters(POSTED_FILTER, dateFilter('Date', 'ge', since));
   const rows = await fetchWithAliases(cfg.resource, { filter });
+  const ids = rows.map((r) => r.Ref_Key).filter((id) => !emptyKey(id));
 
   let count = 0;
   for (const r of rows) {
@@ -144,92 +152,128 @@ async function syncOneDocType(cfg: DocConfig, since: Date, maps: MapsCache): Pro
 
     const articleId = articleKey && !emptyKey(articleKey) ? articleKey : null;
     const kontragentId = kontragentKey && !emptyKey(kontragentKey) ? kontragentKey : null;
-    const kassaId = cfg.hasKassa && r.Касса_Key && !emptyKey(r.Касса_Key) ? r.Касса_Key : null;
-    const kassaToId = cfg.hasKassaTo && r.КассаПолучатель_Key && !emptyKey(r.КассаПолучатель_Key) ? r.КассаПолучатель_Key : null;
-    // В УНФ KZ счёт хранится в БанковскийСчет_Key, в стандартной УНФ — СчетОрганизации_Key
-    const accountKey = r.БанковскийСчет_Key || r.СчетОрганизации_Key;
-    const accountId = cfg.hasAccount && accountKey && !emptyKey(accountKey) ? accountKey : null;
 
     // Перемещения денег: либо PeremeschenieDC (целиком), либо по ВидОперации
     const isTransfer = cfg.docType === 'PeremeschenieDC' ||
       (r.ВидОперации ? TRANSFER_OPERATIONS.has(r.ВидОперации) : false);
     const direction = isTransfer ? 'transfer' : cfg.direction;
 
+    // ── Резолв сторон документа ──
+    // По умолчанию: используем флаги конфига (hasKassa/hasAccount). Для transfer
+    // эти флаги дополнительно расширяются ниже — чтобы захватить «вторую сторону»,
+    // которая в обычном потоке игнорируется (например, СчетОрганизации_Key
+    // на РасходИзКассы при ВзносНаличнымиВБанк = банк-получатель).
+    let kassaId: string | null = cfg.hasKassa && r.Касса_Key && !emptyKey(r.Касса_Key) ? r.Касса_Key : null;
+    let kassaToId: string | null = cfg.hasKassaTo && r.КассаПолучатель_Key && !emptyKey(r.КассаПолучатель_Key) ? r.КассаПолучатель_Key : null;
+    const headerAccountKey = r.БанковскийСчет_Key || r.СчетОрганизации_Key;
+    let accountId: string | null = cfg.hasAccount && headerAccountKey && !emptyKey(headerAccountKey) ? headerAccountKey : null;
+    let accountToId: string | null = null;
+
+    // ── Захватываем вторую сторону transfer-документов ──
+    if (isTransfer && r.ВидОперации) {
+      const op = r.ВидОперации;
+      // ВзносНаличнымиВБанк: РасходИзКассы. Источник = Касса (уже взяли).
+      //   Получатель = СчетОрганизации_Key — пишем в accountId.
+      if (op === 'ВзносНаличнымиВБанк' && r.СчетОрганизации_Key && !emptyKey(r.СчетОрганизации_Key)) {
+        accountId = r.СчетОрганизации_Key;
+      }
+      // ПолучениеНаличныхВБанке: ПоступлениеВКассу. Получатель = Касса (уже взяли).
+      //   Источник = СчетОрганизации_Key — пишем в accountId.
+      else if (op === 'ПолучениеНаличныхВБанке' && r.СчетОрганизации_Key && !emptyKey(r.СчетОрганизации_Key)) {
+        accountId = r.СчетОрганизации_Key;
+      }
+      // ПереводНаДругойСчет: РасходСоСчета. Источник = БанковскийСчет (уже в accountId).
+      //   Получатель = СчетКонтрагента_Key (для внутренних переводов это наш же счёт).
+      else if (op === 'ПереводНаДругойСчет' && r.СчетКонтрагента_Key && !emptyKey(r.СчетКонтрагента_Key)) {
+        accountToId = r.СчетКонтрагента_Key;
+      }
+    }
+    // PeremeschenieDC: тип ДС может быть Наличные или Безналичные с обеих сторон.
+    // Источник: Касса_Key (если Наличные) или БанковскийСчет_Key (если Безналичные).
+    // Получатель: КассаПолучатель_Key (если Наличные) или БанковскийСчетПолучатель_Key.
+    if (cfg.docType === 'PeremeschenieDC') {
+      const srcIsBank = r.ТипДенежныхСредств === 'Безналичные';
+      const dstIsBank = r.ТипДенежныхСредствПолучатель === 'Безналичные';
+      if (srcIsBank) {
+        kassaId = null;
+        accountId = r.БанковскийСчет_Key && !emptyKey(r.БанковскийСчет_Key) ? r.БанковскийСчет_Key : null;
+      }
+      if (dstIsBank) {
+        kassaToId = null;
+        accountToId = r.БанковскийСчетПолучатель_Key && !emptyKey(r.БанковскийСчетПолучатель_Key) ? r.БанковскийСчетПолучатель_Key : null;
+      }
+    }
+
     const commission = num(r.СуммаКомиссииДокумента);
     const paymentPurpose = normalizeName(r.НазначениеПлатежа) || null;
     const accrualPeriod = r.ПериодРегистрации ? parseDate(r.ПериодРегистрации) : null;
     const recipientName = normalizeName(r.Выдать) || null;
 
+    const commonFields = {
+      docType: cfg.docType,
+      direction,
+      date,
+      number: r.Number || '',
+      amount,
+      commission,
+      kontragentId,
+      kontragentName: kontragentId ? maps.kontragentMap.get(kontragentId) || `[${kontragentId.slice(0, 8)}]` : null,
+      operationType: r.ВидОперации || null,
+      articleId,
+      articleName: articleId ? maps.articleMap.get(articleId) || `[${articleId.slice(0, 8)}]` : null,
+      kassaId,
+      kassaName: kassaId ? maps.kassaMap.get(kassaId) || null : null,
+      kassaToId,
+      kassaToName: kassaToId ? maps.kassaMap.get(kassaToId) || null : null,
+      accountId,
+      accountName: accountId ? maps.bankMap.get(accountId) || null : null,
+      accountToId,
+      accountToName: accountToId ? maps.bankMap.get(accountToId) || null : null,
+      comment: normalizeName(r.Комментарий) || null,
+      paymentPurpose,
+      accrualPeriod,
+      recipientName,
+      posted: r.Posted !== false,
+    };
     await prisma.ddsDocument.upsert({
       where: { id: r.Ref_Key },
-      create: {
-        id: r.Ref_Key,
-        docType: cfg.docType,
-        direction,
-        date,
-        number: r.Number || '',
-        amount,
-        commission,
-        kontragentId,
-        kontragentName: kontragentId ? maps.kontragentMap.get(kontragentId) || `[${kontragentId.slice(0, 8)}]` : null,
-        operationType: r.ВидОперации || null,
-        articleId,
-        articleName: articleId ? maps.articleMap.get(articleId) || `[${articleId.slice(0, 8)}]` : null,
-        kassaId,
-        kassaName: kassaId ? maps.kassaMap.get(kassaId) || null : null,
-        kassaToId,
-        kassaToName: kassaToId ? maps.kassaMap.get(kassaToId) || null : null,
-        accountId,
-        accountName: accountId ? maps.bankMap.get(accountId) || null : null,
-        comment: normalizeName(r.Комментарий) || null,
-        paymentPurpose,
-        accrualPeriod,
-        recipientName,
-        posted: r.Posted !== false,
-      },
-      update: {
-        docType: cfg.docType,
-        direction,
-        date,
-        number: r.Number || '',
-        amount,
-        commission,
-        kontragentId,
-        kontragentName: kontragentId ? maps.kontragentMap.get(kontragentId) || `[${kontragentId.slice(0, 8)}]` : null,
-        operationType: r.ВидОперации || null,
-        articleId,
-        articleName: articleId ? maps.articleMap.get(articleId) || `[${articleId.slice(0, 8)}]` : null,
-        kassaId,
-        kassaName: kassaId ? maps.kassaMap.get(kassaId) || null : null,
-        kassaToId,
-        kassaToName: kassaToId ? maps.kassaMap.get(kassaToId) || null : null,
-        accountId,
-        accountName: accountId ? maps.bankMap.get(accountId) || null : null,
-        comment: normalizeName(r.Комментарий) || null,
-        paymentPurpose,
-        accrualPeriod,
-        recipientName,
-        posted: r.Posted !== false,
-        syncedAt: new Date(),
-      },
+      create: { id: r.Ref_Key, ...commonFields },
+      update: { ...commonFields, syncedAt: new Date() },
     });
     count++;
   }
-  return count;
+  return { count, ids };
 }
 
 export async function syncDds(daysBack?: number) {
   const since = syncSinceDate(daysBack);
   const maps = await loadMaps();
   const result: Record<string, number> = {};
+  const allIds: string[] = [];
+  let anyFailed = false;
 
   for (const cfg of DOC_CONFIGS) {
     try {
-      result[cfg.docType] = await syncOneDocType(cfg, since, maps);
+      const res = await syncOneDocType(cfg, since, maps);
+      result[cfg.docType] = res.count;
+      allIds.push(...res.ids);
     } catch (e: any) {
       result[cfg.docType] = -1;
+      anyFailed = true;
       console.error(`syncDds ${cfg.docType} failed:`, e.message);
     }
   }
+
+  // ── Purge stale: распроведённые/удалённые в 1С ДДС-документы убираем из БД.
+  //    Все типы лежат в одной таблице ddsDocument, поэтому удаляем по объединённому
+  //    набору Ref_Key. Если хоть одна загрузка упала — НЕ чистим (иначе удалим нужное). ──
+  if (!anyFailed) {
+    const dbIds = await prisma.ddsDocument.findMany({ where: { date: { gte: since } }, select: { id: true } });
+    const stale = computeStaleIds(dbIds.map((d) => d.id), allIds);
+    result.purged = stale.length ? (await prisma.ddsDocument.deleteMany({ where: { id: { in: stale } } })).count : 0;
+  } else {
+    result.purged = -1; // пропущено из-за ошибки загрузки
+  }
+
   return result;
 }

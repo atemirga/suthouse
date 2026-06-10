@@ -1,0 +1,5 @@
+config/.env
+usage.db
+__pycache__/
+*.pyc
+.venv/

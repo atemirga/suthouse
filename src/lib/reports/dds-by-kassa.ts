@@ -1,7 +1,16 @@
 // ДДС по кассам — отчёт «Денежные средства в кассе» как в 1С УНФ.
 // Колонки: Начальный остаток · Поступление · Расход · Конечный остаток.
-// Перемещения между кассами учитываются как Поступление на одной стороне и
-// Расход на другой (соответствует 1С ДДС-Касса).
+//
+// Перемещения денежных средств (direction='transfer') учитываются с ОБЕИХ
+// сторон через сохранённые в sync поля kassaId/kassaToId/accountId/accountToId.
+// Маршрутизация по docType:
+//   PeremeschenieDC                     source = kassaId|accountId,
+//                                       dest   = kassaToId|accountToId
+//   RashodIzKassy + ВзносНаличнымиВБанк kassa OUT, account IN
+//   PostuplenieVKassu + ПолучениеНаличныхВБанке  account OUT, kassa IN
+//   PostuplenieVKassu + ПолучениеВзаймы          kassa IN  (односторонне)
+//   RashodSoScheta + ПереводНаДругойСчет         account OUT, accountTo IN
+//   PostuplenieNaSchet + ПолучениеВзаймы         account IN (односторонне)
 
 import { prisma } from '@/lib/db';
 
@@ -22,34 +31,44 @@ export interface DdsByKassaReport {
   totals: { openingBalance: number; inflow: number; outflow: number; closingBalance: number };
 }
 
+type DocRow = {
+  docType: string;
+  direction: string;
+  amount: number;
+  kassaId: string | null;
+  kassaName: string | null;
+  kassaToId: string | null;
+  kassaToName: string | null;
+  accountId: string | null;
+  accountName: string | null;
+  accountToId: string | null;
+  accountToName: string | null;
+};
+
+const SELECT_FIELDS = {
+  docType: true, direction: true, amount: true,
+  kassaId: true, kassaName: true,
+  kassaToId: true, kassaToName: true,
+  accountId: true, accountName: true,
+  accountToId: true, accountToName: true,
+} as const;
+
 export async function buildDdsByKassa(opts: { from: Date; to: Date }): Promise<DdsByKassaReport> {
   const [openings, allBefore, inPeriod] = await Promise.all([
     prisma.openingBalance.findMany({
       where: { kind: 'cash' },
       select: { refId: true, refName: true, refType: true, amount: true },
     }),
-    // Все движения ДО начала периода — для вычисления опенинга периода
     prisma.ddsDocument.findMany({
       where: { date: { lt: opts.from } },
-      select: {
-        docType: true, direction: true, amount: true,
-        kassaId: true, kassaName: true,
-        kassaToId: true, kassaToName: true,
-        accountId: true, accountName: true,
-      },
+      select: SELECT_FIELDS,
     }),
     prisma.ddsDocument.findMany({
       where: { date: { gte: opts.from, lte: opts.to } },
-      select: {
-        docType: true, direction: true, amount: true,
-        kassaId: true, kassaName: true,
-        kassaToId: true, kassaToName: true,
-        accountId: true, accountName: true,
-      },
+      select: SELECT_FIELDS,
     }),
   ]);
 
-  // Map: refId → KassaRow
   const map = new Map<string, KassaRow>();
   function ensure(id: string, name: string | null, type: 'kassa' | 'bank'): KassaRow {
     let r = map.get(id);
@@ -62,61 +81,72 @@ export async function buildDdsByKassa(opts: { from: Date; to: Date }): Promise<D
     return r;
   }
 
-  // Применяем opening balances
+  // Opening из 1С (на asOfDate)
   for (const o of openings) {
     const r = ensure(o.refId, o.refName, (o.refType as 'kassa' | 'bank') || 'kassa');
     r.openingBalance += o.amount;
   }
 
-  // Накатываем движения ДО периода в opening
-  function applyToOpening(d: typeof allBefore[number]) {
-    if (d.docType === 'PeremeschenieDC') {
-      if (d.kassaId) {
-        const r = ensure(d.kassaId, d.kassaName, 'kassa');
-        r.openingBalance -= d.amount;
-      }
-      if (d.kassaToId) {
-        const r = ensure(d.kassaToId, d.kassaToName, 'kassa');
-        r.openingBalance += d.amount;
-      }
+  // Применить движение документа к refId. Положительный delta = приход на счёт,
+  // отрицательный = расход. В opening — копится в openingBalance; в периоде —
+  // раскладывается на inflow/outflow.
+  function add(target: 'opening' | 'period', refId: string | null, refName: string | null, type: 'kassa' | 'bank', delta: number) {
+    if (!refId || delta === 0) return;
+    const r = ensure(refId, refName, type);
+    if (target === 'opening') {
+      r.openingBalance += delta;
+    } else if (delta > 0) {
+      r.inflow += delta;
+    } else {
+      r.outflow += -delta;
+    }
+  }
+
+  function applyDoc(d: DocRow, target: 'opening' | 'period') {
+    // Не-transfer: одна сторона документа (kassa или account), знак = direction.
+    if (d.direction !== 'transfer') {
+      const sign = d.direction === 'inflow' ? 1 : d.direction === 'outflow' ? -1 : 0;
+      if (sign === 0) return;
+      add(target, d.kassaId, d.kassaName, 'kassa', sign * d.amount);
+      add(target, d.accountId, d.accountName, 'bank', sign * d.amount);
       return;
     }
-    const sign = d.direction === 'inflow' ? 1 : d.direction === 'outflow' ? -1 : 0;
-    if (sign === 0) return;
-    if (d.kassaId) {
-      const r = ensure(d.kassaId, d.kassaName, 'kassa');
-      r.openingBalance += sign * d.amount;
-    }
-    if (d.accountId) {
-      const r = ensure(d.accountId, d.accountName, 'bank');
-      r.openingBalance += sign * d.amount;
-    }
-  }
-  for (const d of allBefore) applyToOpening(d);
-
-  // Движения В периоде
-  for (const d of inPeriod) {
-    if (d.docType === 'PeremeschenieDC') {
-      if (d.kassaId) {
-        const r = ensure(d.kassaId, d.kassaName, 'kassa');
-        r.outflow += d.amount;
-      }
-      if (d.kassaToId) {
-        const r = ensure(d.kassaToId, d.kassaToName, 'kassa');
-        r.inflow += d.amount;
-      }
-      continue;
-    }
-    if (d.direction === 'inflow') {
-      if (d.kassaId) ensure(d.kassaId, d.kassaName, 'kassa').inflow += d.amount;
-      if (d.accountId) ensure(d.accountId, d.accountName, 'bank').inflow += d.amount;
-    } else if (d.direction === 'outflow') {
-      if (d.kassaId) ensure(d.kassaId, d.kassaName, 'kassa').outflow += d.amount;
-      if (d.accountId) ensure(d.accountId, d.accountName, 'bank').outflow += d.amount;
+    // Transfer: маршрутизация по docType.
+    switch (d.docType) {
+      case 'PeremeschenieDC':
+        // Источник: kassaId либо accountId (в зависимости от ТипДенежныхСредств,
+        // sync проставляет ровно одно из двух). Получатель: kassaToId либо accountToId.
+        add(target, d.kassaId, d.kassaName, 'kassa', -d.amount);
+        add(target, d.accountId, d.accountName, 'bank', -d.amount);
+        add(target, d.kassaToId, d.kassaToName, 'kassa', d.amount);
+        add(target, d.accountToId, d.accountToName, 'bank', d.amount);
+        return;
+      case 'RashodIzKassy':
+        // ВзносНаличнымиВБанк: kassa OUT, account IN.
+        add(target, d.kassaId, d.kassaName, 'kassa', -d.amount);
+        add(target, d.accountId, d.accountName, 'bank', +d.amount);
+        return;
+      case 'PostuplenieVKassu':
+        // ПолучениеНаличныхВБанке: kassa IN, account OUT.
+        // ПолучениеВзаймы (accountId=null): односторонний kassa IN.
+        add(target, d.kassaId, d.kassaName, 'kassa', +d.amount);
+        add(target, d.accountId, d.accountName, 'bank', -d.amount);
+        return;
+      case 'RashodSoScheta':
+        // ПереводНаДругойСчет: account OUT, accountTo IN.
+        add(target, d.accountId, d.accountName, 'bank', -d.amount);
+        add(target, d.accountToId, d.accountToName, 'bank', +d.amount);
+        return;
+      case 'PostuplenieNaSchet':
+        // ПолучениеВзаймы и т.п.: односторонний account IN.
+        add(target, d.accountId, d.accountName, 'bank', +d.amount);
+        return;
     }
   }
 
-  // closing = opening + inflow − outflow
+  for (const d of allBefore) applyDoc(d, 'opening');
+  for (const d of inPeriod) applyDoc(d, 'period');
+
   for (const r of map.values()) {
     r.closingBalance = r.openingBalance + r.inflow - r.outflow;
   }

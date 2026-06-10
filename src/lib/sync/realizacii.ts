@@ -1,6 +1,6 @@
 import { fetchAllOData, dateFilter, combineFilters, POSTED_FILTER } from '@/lib/odata';
 import { prisma } from '@/lib/db';
-import { normalizeName, emptyKey, parseDate, num, syncSinceDate } from './utils';
+import { normalizeName, emptyKey, parseDate, num, syncSinceDate, computeStaleIds } from './utils';
 import { buildCostPriceMap } from './zakupki';
 
 interface RealizaciaRow {
@@ -141,5 +141,17 @@ export async function syncRealizacii(daysBack?: number) {
     });
     count++;
   }
-  return count;
+
+  // ── Purge stale: документы, что есть в БД за окно синка, но в 1С их больше нет
+  //    среди проведённых (распровели/удалили). Иначе они навсегда завышают выручку. ──
+  const fetchedIds = rows.map((r) => r.Ref_Key).filter((id) => !emptyKey(id));
+  const dbIds = await prisma.realizacia.findMany({ where: { date: { gte: since } }, select: { id: true } });
+  const stale = computeStaleIds(dbIds.map((d) => d.id), fetchedIds);
+  let purged = 0;
+  if (stale.length) {
+    await prisma.realizaciaItem.deleteMany({ where: { realizaciaId: { in: stale } } });
+    purged = (await prisma.realizacia.deleteMany({ where: { id: { in: stale } } })).count;
+  }
+
+  return { upserted: count, purged };
 }

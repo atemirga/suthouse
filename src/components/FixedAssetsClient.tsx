@@ -79,7 +79,7 @@ export default function FixedAssetsClient({ items }: { items: Item[] }) {
               <th className="text-right">Срок (мес)</th>
               <th className="text-right">Аморт./мес</th>
               <th>Ввод в эксплуатацию</th>
-              <th></th>
+              <th className="text-right"></th>
             </tr>
           </thead>
           <tbody>

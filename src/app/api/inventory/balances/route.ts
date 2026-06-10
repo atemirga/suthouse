@@ -7,7 +7,11 @@ export const dynamic = 'force-dynamic';
 export async function GET(req: NextRequest) {
   const sp = req.nextUrl.searchParams;
   try {
-    const report = await buildInventory({ warehouseId: sp.get('warehouseId') || undefined });
+    const coverDays = sp.get('coverDays') ? Number(sp.get('coverDays')) : undefined;
+    const report = await buildInventory({
+      warehouseId: sp.get('warehouseId') || undefined,
+      coverDays,
+    });
     return NextResponse.json(report);
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });

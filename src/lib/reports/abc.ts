@@ -1,12 +1,17 @@
-// ABC-анализ номенклатуры по выручке (Парето 80/15/5).
+// ABC-анализ номенклатуры по Парето 80/15/5.
 //
 // Метод: SKU сортируем по убыванию выбранного параметра, считаем накопительный
 // процент. До 80% — класс A (главные деньги), 80–95% — B, остальное — C.
 //
 // Параметр анализа:
-//   * 'revenue' — выручка
-//   * 'profit'  — валовая прибыль (выручка − себестоимость FIFO)
-//   * 'quantity' — количество (для логистики/закупа)
+//   * 'revenue'  — выручка
+//   * 'profit'   — валовая прибыль (выручка − себестоимость)
+//   * 'quantity' — масса в кг (в этом бизнесе все продукты весовые)
+//
+// СЕБЕСТОИМОСТЬ: используем factCost из 1С (источник истины, см.
+// [[factcost-from-register]]). На уровне строки она недоступна — поэтому
+// FIFO-cost каждой строки масштабируется коэффициентом factCost/totalCost
+// родительской реализации. Fallback к чистому FIFO, если factCost не загружен.
 
 import { prisma } from '@/lib/db';
 
@@ -15,7 +20,9 @@ export type AbcParam = 'revenue' | 'profit' | 'quantity';
 export interface AbcRow {
   nomenclatureId: string | null;
   name: string;
-  quantity: number;
+  category: string | null;
+  quantity: number;       // = кг (в этом бизнесе все продукты весовые)
+  avgPrice: number;       // средняя цена ₸/кг
   revenue: number;
   cost: number;
   profit: number;
@@ -33,14 +40,16 @@ export interface AbcReport {
     revenue: number;
     cost: number;
     profit: number;
-    quantity: number;
+    quantity: number;     // кг
     skuCount: number;
+    avgPrice: number;     // ₸/кг
+    margin: number;       // средняя маржа
   };
   classCounts: { A: number; B: number; C: number };
   classTotals: {
-    A: { revenue: number; cost: number; profit: number; quantity: number };
-    B: { revenue: number; cost: number; profit: number; quantity: number };
-    C: { revenue: number; cost: number; profit: number; quantity: number };
+    A: { revenue: number; cost: number; profit: number; quantity: number; skuCount: number };
+    B: { revenue: number; cost: number; profit: number; quantity: number; skuCount: number };
+    C: { revenue: number; cost: number; profit: number; quantity: number; skuCount: number };
   };
   rows: AbcRow[];
 }
@@ -49,9 +58,17 @@ interface BuildOpts {
   from: Date;
   to: Date;
   param?: AbcParam;
-  thresholdA?: number; // дефолт 80
-  thresholdB?: number; // дефолт 95
-  limit?: number;      // обрезать N топ для UI; 0 = все
+  thresholdA?: number;
+  thresholdB?: number;
+  limit?: number;
+}
+
+interface SkuAggRow {
+  nomenclatureId: string | null;
+  nomenclatureName: string | null;
+  quantity: number;
+  amount: number;
+  cost_adjusted: number;
 }
 
 export async function buildAbc(opts: BuildOpts): Promise<AbcReport> {
@@ -59,22 +76,61 @@ export async function buildAbc(opts: BuildOpts): Promise<AbcReport> {
   const thA = opts.thresholdA ?? 80;
   const thB = opts.thresholdB ?? 95;
 
-  const grouped = await prisma.realizaciaItem.groupBy({
-    by: ['nomenclatureId', 'nomenclatureName'],
-    where: { realizacia: { posted: true, date: { gte: opts.from, lte: opts.to } } },
-    _sum: { amount: true, quantity: true, costAmount: true },
-  });
+  // Агрегация на стороне БД: для каждой строки items стоимость масштабируется
+  // коэффициентом factCost/totalCost родительской реализации. Где factCost
+  // отсутствует или totalCost=0 — берём чистый costAmount (FIFO).
+  const grouped = await prisma.$queryRaw<SkuAggRow[]>`
+    SELECT
+      ri."nomenclatureId",
+      ri."nomenclatureName",
+      SUM(ri.quantity)::float AS quantity,
+      SUM(ri.amount)::float AS amount,
+      SUM(
+        CASE
+          WHEN r."factCost" IS NOT NULL AND r."totalCost" > 0
+            THEN ri."costAmount" * (r."factCost" / r."totalCost")
+          ELSE ri."costAmount"
+        END
+      )::float AS cost_adjusted
+    FROM "RealizaciaItem" ri
+    JOIN "Realizacia" r ON r.id = ri."realizaciaId"
+    WHERE r.posted = true
+      AND r.date >= ${opts.from}
+      AND r.date <= ${opts.to}
+    GROUP BY ri."nomenclatureId", ri."nomenclatureName"
+  `;
+
+  // Категории номенклатуры — для дополнительной колонки в таблице
+  const nomIds = grouped.map((g) => g.nomenclatureId).filter((x): x is string => !!x);
+  const noms = nomIds.length
+    ? await prisma.nomenclature.findMany({
+        where: { id: { in: nomIds } },
+        select: { id: true, categoryId: true },
+      })
+    : [];
+  const catIds = Array.from(new Set(noms.map((n) => n.categoryId).filter((x): x is string => !!x)));
+  const cats = catIds.length
+    ? await prisma.nomenclatureCategory.findMany({
+        where: { id: { in: catIds } },
+        select: { id: true, name: true },
+      })
+    : [];
+  const catName = new Map(cats.map((c) => [c.id, c.name]));
+  const nomToCat = new Map(noms.map((n) => [n.id, n.categoryId ? catName.get(n.categoryId) || null : null]));
 
   const rows: AbcRow[] = grouped.map((g) => {
-    const revenue = g._sum.amount || 0;
-    const cost = g._sum.costAmount || 0;
-    const quantity = g._sum.quantity || 0;
+    const revenue = g.amount || 0;
+    const cost = g.cost_adjusted || 0;
+    const quantity = g.quantity || 0;
     const profit = revenue - cost;
     const margin = revenue > 0 ? profit / revenue : 0;
+    const avgPrice = quantity > 0 ? revenue / quantity : 0;
     return {
       nomenclatureId: g.nomenclatureId,
       name: g.nomenclatureName || '—',
+      category: g.nomenclatureId ? nomToCat.get(g.nomenclatureId) || null : null,
       quantity,
+      avgPrice,
       revenue,
       cost,
       profit,
@@ -85,7 +141,6 @@ export async function buildAbc(opts: BuildOpts): Promise<AbcReport> {
     };
   });
 
-  // Сортировка по параметру и расчёт долей.
   const valueOf = (r: AbcRow) =>
     param === 'revenue' ? r.revenue : param === 'profit' ? r.profit : r.quantity;
 
@@ -95,9 +150,9 @@ export async function buildAbc(opts: BuildOpts): Promise<AbcReport> {
   let cum = 0;
   const classCounts = { A: 0, B: 0, C: 0 };
   const classTotals = {
-    A: { revenue: 0, cost: 0, profit: 0, quantity: 0 },
-    B: { revenue: 0, cost: 0, profit: 0, quantity: 0 },
-    C: { revenue: 0, cost: 0, profit: 0, quantity: 0 },
+    A: { revenue: 0, cost: 0, profit: 0, quantity: 0, skuCount: 0 },
+    B: { revenue: 0, cost: 0, profit: 0, quantity: 0, skuCount: 0 },
+    C: { revenue: 0, cost: 0, profit: 0, quantity: 0, skuCount: 0 },
   };
   for (const r of rows) {
     const v = Math.max(0, valueOf(r));
@@ -112,14 +167,22 @@ export async function buildAbc(opts: BuildOpts): Promise<AbcReport> {
     classTotals[r.abcClass].cost += r.cost;
     classTotals[r.abcClass].profit += r.profit;
     classTotals[r.abcClass].quantity += r.quantity;
+    classTotals[r.abcClass].skuCount++;
   }
 
+  const totalRevenue = rows.reduce((s, r) => s + r.revenue, 0);
+  const totalCost = rows.reduce((s, r) => s + r.cost, 0);
+  const totalQty = rows.reduce((s, r) => s + r.quantity, 0);
+  const totalProfit = totalRevenue - totalCost;
+
   const totals = {
-    revenue: rows.reduce((s, r) => s + r.revenue, 0),
-    cost: rows.reduce((s, r) => s + r.cost, 0),
-    profit: rows.reduce((s, r) => s + r.profit, 0),
-    quantity: rows.reduce((s, r) => s + r.quantity, 0),
+    revenue: totalRevenue,
+    cost: totalCost,
+    profit: totalProfit,
+    quantity: totalQty,
     skuCount: rows.length,
+    avgPrice: totalQty > 0 ? totalRevenue / totalQty : 0,
+    margin: totalRevenue > 0 ? totalProfit / totalRevenue : 0,
   };
 
   return {

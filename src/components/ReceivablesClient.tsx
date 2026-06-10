@@ -9,7 +9,7 @@ const fmtCompact = (n: number) => {
   if (abs >= 1e9) return (n / 1e9).toFixed(2) + ' млрд';
   if (abs >= 1e6) return (n / 1e6).toFixed(1) + ' млн';
   if (abs >= 1e3) return (n / 1e3).toFixed(0) + ' тыс';
-  return String(Math.round(n));
+  return Math.round(n).toLocaleString('ru-RU');
 };
 
 interface BucketDef { key: string; label: string; color: string }
@@ -22,6 +22,7 @@ interface Row {
   buckets: Record<string, number>;
   oldestDate: string | null;
   oldestDays: number;
+  responsibleName: string | null;
 }
 
 interface Data {
@@ -69,7 +70,7 @@ export default function ReceivablesClient({
       {/* Top KPI */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <KpiBlock label="Всего долг" value={fmtCompact(initialData.totals.debt)} suffix="₸" color="red" big />
-        <KpiBlock label="Должников" value={String(initialData.totals.debtorCount)} color="amber" />
+        <KpiBlock label="Должников" value={initialData.totals.debtorCount.toLocaleString('ru-RU')} color="amber" />
         <KpiBlock label="Просрочка 30+ дн" value={fmtCompact(initialData.totals.overdue30Plus)} suffix="₸" color="red"
                   sub={totalDebt > 0 ? ((initialData.totals.overdue30Plus / totalDebt) * 100).toFixed(1) + '% от долга' : ''} />
         <KpiBlock label="Авансы получ." value={fmtCompact(initialData.totals.prepayments)} suffix="₸" color="green" />
@@ -129,6 +130,7 @@ export default function ReceivablesClient({
             <tr>
               <th className="w-8">#</th>
               <th>Контрагент</th>
+              <th>Автор</th>
               <th className="text-right">Всего долг</th>
               {bucketDefs.map((b) => (
                 <th key={b.key} className="text-right">
@@ -141,12 +143,13 @@ export default function ReceivablesClient({
           </thead>
           <tbody>
             {rows.length === 0 && (
-              <tr><td colSpan={9} className="text-center text-gray-500 py-8">Долгов нет</td></tr>
+              <tr><td colSpan={10} className="text-center text-gray-500 py-8">Долгов нет</td></tr>
             )}
             {rows.map((r, i) => (
               <tr key={r.kontragentId}>
                 <td className="text-gray-400 text-xs">{i + 1}</td>
                 <td className="text-sm">{r.kontragentName}</td>
+                <td className="text-xs text-gray-600">{r.responsibleName || <span className="text-gray-300">—</span>}</td>
                 <td className="num font-semibold">{fmt(r.totalDebt)}</td>
                 {bucketDefs.map((b) => {
                   const v = r.buckets[b.key] || 0;
@@ -170,7 +173,7 @@ export default function ReceivablesClient({
           {rows.length > 0 && (
             <tfoot>
               <tr className="total">
-                <td colSpan={2}>Итого по фильтру</td>
+                <td colSpan={3}>Итого по фильтру</td>
                 <td className="num">{fmt(rows.reduce((s, r) => s + r.totalDebt, 0))}</td>
                 {bucketDefs.map((b) => (
                   <td key={b.key} className="num">{fmt(rows.reduce((s, r) => s + (r.buckets[b.key] || 0), 0))}</td>

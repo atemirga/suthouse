@@ -1,5 +1,6 @@
-import { startOfMonth, endOfMonth, parseISO } from 'date-fns';
+import { startOfMonth, endOfMonth } from 'date-fns';
 import { buildPackersReport } from '@/lib/reports/packers';
+import { parsePeriodFrom, parsePeriodTo } from '@/lib/dates';
 import PeriodPicker from '@/components/PeriodPicker';
 import PackersClient from '@/components/PackersClient';
 
@@ -10,8 +11,8 @@ interface Props {
 }
 
 export default async function PackersPage({ searchParams }: Props) {
-  const from = searchParams.from ? parseISO(searchParams.from) : startOfMonth(new Date());
-  const to = searchParams.to ? parseISO(searchParams.to) : endOfMonth(new Date());
+  const from = searchParams.from ? parsePeriodFrom(searchParams.from) : startOfMonth(new Date());
+  const to = searchParams.to ? parsePeriodTo(searchParams.to) : endOfMonth(new Date());
   const report = await buildPackersReport({ from, to });
 
   return (
@@ -19,7 +20,7 @@ export default async function PackersPage({ searchParams }: Props) {
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Упаковщики</h1>
         <p className="text-sm text-gray-500 mt-0.5">
-          Кто фактически собирал заказы. Источник — доп.реквизит «Упаковщик» в Заказе покупателя.
+          Кто фактически отгрузил заказы. Считаем по расходным накладным; имя упаковщика берётся из доп.реквизита «Упаковщик» в Заказе покупателя.
         </p>
       </div>
       <PeriodPicker showGranularity={false} />

@@ -4,9 +4,10 @@ import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 import { useState, useEffect, useMemo } from 'react';
 import {
   startOfMonth, endOfMonth,
+  startOfDay, endOfDay,
   startOfQuarter, endOfQuarter,
   startOfYear, endOfYear,
-  subMonths, format, parseISO, isSameDay,
+  subMonths, subDays, format, parseISO, isSameDay,
 } from 'date-fns';
 import { IconFilter } from './Icons';
 
@@ -20,6 +21,8 @@ interface Preset {
 }
 
 const presets: Preset[] = [
+  { key: 'today', label: 'Сегодня', range: () => ({ from: startOfDay(new Date()), to: endOfDay(new Date()) }), recommendedGran: 'day' },
+  { key: 'yesterday', label: 'Вчера', range: () => ({ from: startOfDay(subDays(new Date(), 1)), to: endOfDay(subDays(new Date(), 1)) }), recommendedGran: 'day' },
   { key: 'this_month', label: 'Тек. месяц', range: () => ({ from: startOfMonth(new Date()), to: endOfMonth(new Date()) }), recommendedGran: 'month' },
   { key: 'last_month', label: 'Прошл. месяц', range: () => ({ from: startOfMonth(subMonths(new Date(), 1)), to: endOfMonth(subMonths(new Date(), 1)) }), recommendedGran: 'month' },
   { key: 'last_3', label: '3 месяца', range: () => ({ from: startOfMonth(subMonths(new Date(), 2)), to: endOfMonth(new Date()) }), recommendedGran: 'month' },

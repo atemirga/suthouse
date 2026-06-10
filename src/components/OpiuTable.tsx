@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { OpiuReport } from '@/lib/reports/opiu';
 import { format } from 'date-fns';
 
@@ -22,6 +22,7 @@ interface DocRow {
 export default function OpiuTable({ report }: { report: OpiuReport }) {
   const [drill, setDrill] = useState<{ category: string; label: string; docs: DocRow[] } | null>(null);
   const [drillLoading, setDrillLoading] = useState(false);
+  const [heatmap, setHeatmap] = useState(true);
 
   async function openDrill(category: string, label: string) {
     setDrillLoading(true);
@@ -40,8 +41,61 @@ export default function OpiuTable({ report }: { report: OpiuReport }) {
     }
   }
 
+  // Heatmap stats: для каждой расходной строки считаем max abs(value)
+  // среди ячеек, чтобы шкалировать насыщенность фона по столбцам.
+  const rowStats = useMemo(() => {
+    const m = new Map<string, { max: number; isExpense: boolean }>();
+    for (const row of report.rows) {
+      if (row.kind !== 'value' || row.isPct) continue;
+      const vals = report.columns.map((c) => row.values[c] || 0);
+      const nonZero = vals.filter((v) => v !== 0);
+      if (nonZero.length === 0) continue;
+      // Считаем строку расходной если её total отрицателен (в финансистском
+      // и стандартном виде расходы хранятся со знаком −) либо большинство
+      // ненулевых значений отрицательные.
+      const negCount = nonZero.filter((v) => v < 0).length;
+      const isExpense = (row.total || 0) < 0 || negCount > nonZero.length / 2;
+      if (!isExpense) continue;
+      const maxAbs = Math.max(...vals.map((v) => Math.abs(v)));
+      m.set(row.id, { max: maxAbs, isExpense });
+    }
+    return m;
+  }, [report]);
+
+  function heatStyle(rowId: string, value: number): React.CSSProperties | undefined {
+    if (!heatmap) return undefined;
+    const stat = rowStats.get(rowId);
+    if (!stat || stat.max === 0) return undefined;
+    const abs = Math.abs(value);
+    if (abs === 0) return undefined;
+    // Доля от максимума → шкала 0..1, далее в opacity 0..0.55.
+    const ratio = abs / stat.max;
+    // Усиливаем верхнюю часть шкалы, чтобы «чуть больше» != «сильно больше».
+    const intensity = Math.pow(ratio, 1.4);
+    const alpha = Math.min(0.55, intensity * 0.55);
+    return { background: `rgba(239, 68, 68, ${alpha.toFixed(3)})` };
+  }
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
+      <div className="flex items-center gap-3 text-xs text-gray-600">
+        <label className="flex items-center gap-1.5 cursor-pointer">
+          <input type="checkbox" checked={heatmap} onChange={(e) => setHeatmap(e.target.checked)} />
+          Подсветка по уровню расходов
+        </label>
+        {heatmap && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-gray-400">шкала:</span>
+            <span className="inline-block w-4 h-3 rounded" style={{ background: 'rgba(239,68,68,0.10)' }} />
+            <span className="text-gray-500">норма</span>
+            <span className="inline-block w-4 h-3 rounded" style={{ background: 'rgba(239,68,68,0.30)' }} />
+            <span className="text-gray-500">повышено</span>
+            <span className="inline-block w-4 h-3 rounded" style={{ background: 'rgba(239,68,68,0.55)' }} />
+            <span className="text-gray-500">сильно</span>
+          </div>
+        )}
+      </div>
+
       <div className="bg-white border border-gray-200 rounded-lg overflow-auto">
         <table className="report">
           <thead>
@@ -90,11 +144,15 @@ export default function OpiuTable({ report }: { report: OpiuReport }) {
                       row.label
                     )}
                   </td>
-                  {report.columns.map((c) => (
-                    <td key={c} className="num">
-                      {row.kind === 'header' ? '' : fmt(row.values[c] || 0, row.isPct)}
-                    </td>
-                  ))}
+                  {report.columns.map((c) => {
+                    const value = row.values[c] || 0;
+                    const style = heatStyle(row.id, value);
+                    return (
+                      <td key={c} className="num" style={style}>
+                        {row.kind === 'header' ? '' : fmt(value, row.isPct)}
+                      </td>
+                    );
+                  })}
                   <td className="num">
                     {row.kind === 'header' ? '' : fmt(row.total || 0, row.isPct)}
                   </td>

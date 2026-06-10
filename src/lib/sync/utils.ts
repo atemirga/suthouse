@@ -29,9 +29,11 @@ export function chunk<T>(arr: T[], size: number): T[][] {
 
 export function parseDate(s: string | null | undefined): Date | null {
   if (!s) return null;
-  // 1С отдаёт ISO без таймзоны: "2026-01-15T00:00:00"
-  // Интерпретируем как Asia/Almaty (UTC+5) → конвертируем в UTC
-  const d = new Date(s + (s.endsWith('Z') || /[+-]\d\d:?\d\d$/.test(s) ? '' : 'Z'));
+  // 1С отдаёт ISO без таймзоны: "2026-01-15T00:00:00" — это локальное Almaty (UTC+5).
+  // Приписываем +05:00, чтобы получить корректный UTC-момент в БД.
+  // Если в строке уже есть TZ-суффикс — оставляем как есть.
+  const hasTz = s.endsWith('Z') || /[+-]\d\d:?\d\d$/.test(s);
+  const d = new Date(hasTz ? s : s + '+05:00');
   if (isNaN(d.getTime())) return null;
   return d;
 }
@@ -39,4 +41,13 @@ export function parseDate(s: string | null | undefined): Date | null {
 export function num(v: any): number {
   const n = Number(v);
   return isFinite(n) ? n : 0;
+}
+
+// Ref_Key'и, которые лежат в БД (внутри окна синка), но отсутствуют в свежем
+// posted-наборе из 1С — значит, документ в 1С распровели или пометили на удаление.
+// Синки тянут только Posted=true, поэтому такие документы выпадают из фида и иначе
+// зависают в БД навсегда, завышая отчёты. Их нужно удалить.
+export function computeStaleIds(dbIds: string[], fetchedIds: Iterable<string>): string[] {
+  const fresh = new Set(fetchedIds);
+  return dbIds.filter((id) => !fresh.has(id));
 }

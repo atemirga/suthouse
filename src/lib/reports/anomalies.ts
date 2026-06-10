@@ -11,6 +11,11 @@
 //   • zeroPriceSales    — продажи с ценой = 0
 //   • zeroQtyItems      — позиции с количеством 0
 //   • duplicateNumbers  — документы с одинаковым номером в одной таблице
+//   • cancelledDocs     — НЕ-проведённые документы с ненулевыми суммами (мог
+//                          быть «отменён» расход уже после его учёта)
+//   • cashOutflowNoCp   — крупные расходы без контрагента (касса) — подозрение
+//   • warehouseMismatch — расхождение факт.остатка vs (начало + приход − расход − списания)
+//                          для топовых по объёму номенклатур
 
 import { prisma } from '@/lib/db';
 import { endOfDay } from 'date-fns';
@@ -389,6 +394,197 @@ export async function buildAnomalies(): Promise<AnomaliesReport> {
     count: dupDocs.length,
     docs: dupDocs.slice(0, TAKE),
     truncated: dupDocs.length > TAKE,
+  });
+
+  // ─── 9. Отменённые/непроведённые документы с ненулевыми суммами ─────
+  // Могут указывать на то, что расход «убрали» (снятие проводки в 1С) уже
+  // после того, как был учтён. Финансово опасно: если документ ранее попал
+  // в отчёт, а потом снят с проведения — ОПиУ «съезжает» задним числом.
+  const [cancRealiz, cancZakup, cancDds, cancWriteOff] = await Promise.all([
+    prisma.realizacia.findMany({
+      where: { posted: false, totalAmount: { gt: 0 } },
+      orderBy: { date: 'desc' },
+      take: TAKE,
+      select: { id: true, date: true, number: true, totalAmount: true, kontragentName: true, responsibleName: true },
+    }),
+    prisma.zakupka.findMany({
+      where: { posted: false, totalAmount: { gt: 0 } },
+      orderBy: { date: 'desc' },
+      take: TAKE,
+      select: { id: true, date: true, number: true, totalAmount: true, kontragentName: true },
+    }),
+    prisma.ddsDocument.findMany({
+      where: { posted: false, amount: { gt: 0 } },
+      orderBy: { date: 'desc' },
+      take: TAKE,
+      select: { id: true, date: true, number: true, amount: true, kontragentName: true, docType: true, direction: true, articleName: true },
+    }),
+    prisma.writeOff.findMany({
+      where: { posted: false, totalAmount: { gt: 0 } },
+      orderBy: { date: 'desc' },
+      take: TAKE,
+      select: { id: true, date: true, number: true, totalAmount: true, correspondenceName: true, responsibleName: true },
+    }),
+  ]);
+  const cancDocs: AnomalyDoc[] = [
+    ...cancRealiz.map((r) => ({ id: r.id, date: r.date, number: r.number, amount: r.totalAmount, detail: `Реализация · ${r.kontragentName || '—'}${r.responsibleName ? ' · ' + r.responsibleName : ''}` })),
+    ...cancZakup.map((z) => ({ id: z.id, date: z.date, number: z.number, amount: z.totalAmount, detail: `Закупка · ${z.kontragentName || '—'}` })),
+    ...cancDds.map((d) => ({ id: d.id, date: d.date, number: d.number, amount: d.amount, detail: `ДДС (${d.docType}, ${d.direction}) · ${d.kontragentName || '—'} · ${d.articleName || 'без статьи'}` })),
+    ...cancWriteOff.map((w) => ({ id: w.id, date: w.date, number: w.number, amount: w.totalAmount, detail: `Списание · ${w.correspondenceName || '—'}${w.responsibleName ? ' · ' + w.responsibleName : ''}` })),
+  ].sort((a, b) => (b.date?.getTime() || 0) - (a.date?.getTime() || 0));
+  const cancCount = cancRealiz.length + cancZakup.length + cancDds.length + cancWriteOff.length;
+  cats.push({
+    key: 'cancelledDocs',
+    title: 'Отменённые документы с суммами',
+    description: 'Документы со снятой проводкой (posted=false), но ненулевой суммой. Если такой документ ранее попадал в отчёт, его «снятие» меняет цифры задним числом — подозрительный приём для скрытия расхода или продажи.',
+    severity: cancCount > 0 ? 'high' : 'low',
+    count: cancCount,
+    totalAmount: cancDocs.reduce((s, d) => s + (d.amount || 0), 0),
+    docs: cancDocs.slice(0, TAKE),
+    truncated: cancCount > TAKE,
+  });
+
+  // ─── 10. Крупные кассовые расходы без контрагента ────────────────────
+  // Outflow без указанного получателя — кандидат на «вынос» наличных.
+  // Порог — 50 000 ₸, чтобы не плодить мелкие подотчётные траты.
+  const CASH_NOPARTY_THRESHOLD = 50_000;
+  const cashNoCp = await prisma.ddsDocument.findMany({
+    where: {
+      posted: true,
+      direction: 'outflow',
+      kontragentId: null,
+      docType: { not: 'PeremeschenieDC' },
+      amount: { gt: CASH_NOPARTY_THRESHOLD },
+    },
+    orderBy: [{ amount: 'desc' }, { date: 'desc' }],
+    take: TAKE,
+    select: { id: true, date: true, number: true, amount: true, docType: true, articleName: true, kassaName: true, accountName: true, paymentPurpose: true, comment: true },
+  });
+  const cashNoCpCount = await prisma.ddsDocument.count({
+    where: {
+      posted: true,
+      direction: 'outflow',
+      kontragentId: null,
+      docType: { not: 'PeremeschenieDC' },
+      amount: { gt: CASH_NOPARTY_THRESHOLD },
+    },
+  });
+  cats.push({
+    key: 'cashOutflowNoCp',
+    title: `Кассовые расходы без получателя (> ${CASH_NOPARTY_THRESHOLD.toLocaleString('ru-RU')} ₸)`,
+    description: 'Крупные расходы (outflow) из кассы или банка без указанного контрагента-получателя. Это естественно для подотчётов и мелких покупок, но крупные суммы без получателя — повод для проверки. Возможен «вынос» наличных.',
+    severity: cashNoCp.length > 0 ? 'medium' : 'low',
+    count: cashNoCpCount,
+    totalAmount: cashNoCp.reduce((s, d) => s + d.amount, 0),
+    docs: cashNoCp.map((d) => ({
+      id: d.id,
+      date: d.date,
+      number: d.number,
+      amount: d.amount,
+      detail: `${d.docType} · ${d.kassaName || d.accountName || '—'} · ${d.articleName || 'без статьи'}${d.paymentPurpose ? ' · ' + d.paymentPurpose.slice(0, 100) : (d.comment ? ' · ' + d.comment.slice(0, 100) : '')}`,
+    })),
+    truncated: cashNoCpCount > TAKE,
+  });
+
+  // ─── 11. Склад: расхождения остатка ──────────────────────────────────
+  // Для каждой номенклатуры сравниваем фактический остаток (InventoryBalance —
+  // последний снимок из 1С) с расчётным: InventoryOpening + закупки −
+  // реализации − списания. Допускаем ±2 кг (округления / ошибки взвешивания).
+  // Если |Δ| > порога — подсвечиваем: либо потеря/кража, либо ошибка ввода.
+  const WAREHOUSE_TOLERANCE = 2; // кг
+  const balances = await prisma.inventoryBalance.findMany({
+    select: { nomenclatureId: true, nomenclatureName: true, quantity: true },
+  });
+  const factByNom = new Map<string, { name: string; qty: number }>();
+  for (const b of balances) {
+    const prev = factByNom.get(b.nomenclatureId);
+    factByNom.set(b.nomenclatureId, {
+      name: b.nomenclatureName || prev?.name || '—',
+      qty: (prev?.qty || 0) + b.quantity,
+    });
+  }
+
+  // Расчётный остаток = opening + закупки − реализации − списания.
+  // Возвраты от покупателей (Zakupka.isReturn=true) — это «приход обратно
+  // на склад», поэтому считаем как положительный приход.
+  const [openings, purchaseAgg, salesAgg, writeOffAgg] = await Promise.all([
+    prisma.inventoryOpening.groupBy({
+      by: ['nomenclatureId'],
+      _sum: { qty: true },
+    }),
+    prisma.$queryRaw<Array<{ nomenclatureId: string; qty: number }>>`
+      SELECT zi."nomenclatureId" AS "nomenclatureId", SUM(zi.quantity)::float AS qty
+      FROM "ZakupkaItem" zi JOIN "Zakupka" z ON z.id = zi."zakupkaId"
+      WHERE z.posted = true AND zi."nomenclatureId" IS NOT NULL
+      GROUP BY zi."nomenclatureId"
+    `,
+    prisma.$queryRaw<Array<{ nomenclatureId: string; qty: number }>>`
+      SELECT ri."nomenclatureId" AS "nomenclatureId", SUM(ri.quantity)::float AS qty
+      FROM "RealizaciaItem" ri JOIN "Realizacia" r ON r.id = ri."realizaciaId"
+      WHERE r.posted = true AND ri."nomenclatureId" IS NOT NULL
+      GROUP BY ri."nomenclatureId"
+    `,
+    prisma.$queryRaw<Array<{ nomenclatureId: string; qty: number }>>`
+      SELECT wi."nomenclatureId" AS "nomenclatureId", SUM(wi.quantity)::float AS qty
+      FROM "WriteOffItem" wi JOIN "WriteOff" w ON w.id = wi."writeOffId"
+      WHERE w.posted = true AND wi."nomenclatureId" IS NOT NULL
+      GROUP BY wi."nomenclatureId"
+    `,
+  ]);
+  const openMap = new Map<string, number>();
+  for (const o of openings) if (o.nomenclatureId) openMap.set(o.nomenclatureId, o._sum.qty || 0);
+  const purMap = new Map<string, number>();
+  for (const p of purchaseAgg) purMap.set(p.nomenclatureId, p.qty);
+  const salMap = new Map<string, number>();
+  for (const s of salesAgg) salMap.set(s.nomenclatureId, s.qty);
+  const woMap = new Map<string, number>();
+  for (const w of writeOffAgg) woMap.set(w.nomenclatureId, w.qty);
+
+  // Объединяем все nomenclatureId в один набор.
+  const allNomIds = new Set<string>([
+    ...factByNom.keys(),
+    ...openMap.keys(),
+    ...purMap.keys(),
+    ...salMap.keys(),
+    ...woMap.keys(),
+  ]);
+
+  type Mismatch = { id: string; name: string; fact: number; calc: number; diff: number };
+  const mismatches: Mismatch[] = [];
+  for (const nomId of allNomIds) {
+    const fact = factByNom.get(nomId)?.qty || 0;
+    const calc =
+      (openMap.get(nomId) || 0) +
+      (purMap.get(nomId) || 0) -
+      (salMap.get(nomId) || 0) -
+      (woMap.get(nomId) || 0);
+    const diff = fact - calc;
+    if (Math.abs(diff) > WAREHOUSE_TOLERANCE) {
+      mismatches.push({
+        id: nomId,
+        name: factByNom.get(nomId)?.name || '—',
+        fact,
+        calc,
+        diff,
+      });
+    }
+  }
+  mismatches.sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
+  const mismatchTotal = mismatches.reduce((s, m) => s + Math.abs(m.diff), 0);
+  cats.push({
+    key: 'warehouseMismatch',
+    title: 'Расхождения остатков складов',
+    description: 'Факт.остаток (снимок из 1С) не совпадает с расчётным: начало + закупки − продажи − списания. Допуск ±2 кг. Большое отрицательное расхождение (фактически меньше расчётного) — потенциальная недостача/кража. Положительное — пересорт или незарегистрированный приход.',
+    severity: mismatches.length > 0 ? 'medium' : 'low',
+    count: mismatches.length,
+    totalAmount: mismatchTotal,
+    docs: mismatches.slice(0, TAKE).map((m) => ({
+      id: m.id,
+      number: m.name,
+      amount: m.diff,
+      detail: `факт ${m.fact.toFixed(1)} кг · расчёт ${m.calc.toFixed(1)} кг · Δ ${m.diff > 0 ? '+' : ''}${m.diff.toFixed(1)} кг`,
+    })),
+    truncated: mismatches.length > TAKE,
   });
 
   const totalIssues = cats.reduce((s, c) => s + c.count, 0);

@@ -102,7 +102,7 @@ export default function AdjustmentsClient({ items }: { items: Item[] }) {
       <div className="bg-white border border-gray-200 rounded-lg overflow-auto">
         <table className="report">
           <thead>
-            <tr><th>Месяц</th><th>Категория</th><th className="text-right">Сумма</th><th>Комментарий</th><th>Создано</th><th></th></tr>
+            <tr><th>Месяц</th><th>Категория</th><th className="text-right">Сумма</th><th>Комментарий</th><th>Создано</th><th className="text-right"></th></tr>
           </thead>
           <tbody>
             {items.length === 0 && <tr><td colSpan={6} className="text-center text-gray-500 py-6">Корректировок нет</td></tr>}

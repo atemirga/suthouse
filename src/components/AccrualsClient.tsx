@@ -68,7 +68,7 @@ export default function AccrualsClient({ rules, articles }: { rules: Rule[]; art
       <div className="bg-white border border-gray-200 rounded-lg overflow-auto">
         <table className="report">
           <thead>
-            <tr><th>Статья</th><th>Месяцев</th><th>Метод</th><th></th></tr>
+            <tr><th>Статья</th><th>Месяцев</th><th>Метод</th><th className="text-right"></th></tr>
           </thead>
           <tbody>
             {rules.length === 0 && <tr><td colSpan={4} className="text-center text-gray-500 py-6">Правил нет</td></tr>}

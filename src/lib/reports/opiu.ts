@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { addMonths, format, isBefore, isAfter, parse } from 'date-fns';
 import { resolvePeriod, emptyMatrix, type PeriodInput, type Granularity } from './period';
+import { loadAmortizationFromSheet } from '@/lib/sync/amortization';
 
 export type OpiuCategory =
   | 'revenue'
@@ -103,8 +104,11 @@ function addToBucket(buckets: Record<string, CategoryBucket>, cat: string, col: 
   buckets[cat].total += amount;
 }
 
-export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
+export type OpiuView = 'standard' | 'financist';
+
+export async function buildOpiu(input: PeriodInput & { view?: OpiuView }): Promise<OpiuReport> {
   const period = resolvePeriod(input);
+  const view: OpiuView = input.view || 'standard';
   const buckets: Record<string, CategoryBucket> = {};
 
   // 1. Выручка и себестоимость — из реализаций.
@@ -117,7 +121,7 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
   // ВАЖНО: вычитаем возвраты от покупателей (Document_ПриходнаяНакладная
   // с ВидОперации=ВозвратОтПокупателя, у нас Zakupka.isReturn=true).
   // В 1С такие документы идут как «приходные», но по сути это снижение выручки.
-  const [realizacii, returns] = await Promise.all([
+  const [realizacii, returns, itemsAgg] = await Promise.all([
     prisma.realizacia.findMany({
       where: { date: { gte: period.from, lte: period.to }, posted: true },
       select: { date: true, itemsAmount: true, totalCost: true, factCost: true },
@@ -126,11 +130,29 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
       where: { date: { gte: period.from, lte: period.to }, posted: true, isReturn: true },
       select: { date: true, totalAmount: true },
     }),
+    // Для финансистского вида: gross = sum(qty*price) на уровне items
+    // (= сумма по прайсу), discount = sum(RealizaciaItem.discount) = sum(qty*price - amount).
+    // Финансист в своей таблице показывает скидку меньше (133K vs наших 367K за апр.26)
+    // — у него фильтр по типу скидки («наличная»), у нас в БД признака нет.
+    prisma.$queryRaw<Array<{ date: Date; gross: number; discount: number }>>`
+      SELECT r.date,
+             SUM(ri.quantity * ri.price)             AS gross,
+             SUM(ri.quantity * ri.price - ri.amount) AS discount
+      FROM "RealizaciaItem" ri
+      JOIN "Realizacia" r ON r.id = ri."realizaciaId"
+      WHERE r.date >= ${period.from} AND r.date <= ${period.to} AND r.posted = true
+      GROUP BY r.date
+    `,
   ]);
   for (const r of realizacii) {
     const col = period.bucketOf(r.date);
     addToBucket(buckets, 'revenue', col, r.itemsAmount);
     addToBucket(buckets, 'cogs', col, r.factCost ?? r.totalCost);
+  }
+  for (const row of itemsAgg) {
+    const col = period.bucketOf(row.date);
+    addToBucket(buckets, 'revenue_gross', col, Number(row.gross));
+    addToBucket(buckets, 'revenue_discount', col, Number(row.discount));
   }
   // Возвраты вычитаем из выручки. Себестоимость возвращённого товара
   // (totalCost) у нас в Zakupka не хранится — её можно учесть позже,
@@ -226,11 +248,23 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
     select: { date: true, amount: true, articleId: true },
   });
 
+  // Все статьи (для маппинга id→category и id→name).
+  // name начинается с кода вида "1.06" / "2.01" / "3.05" — по нему строится
+  // финансистская иерархия.
   const articles = await prisma.ddsArticle.findMany({
-    where: { opiuCategory: { not: null } },
-    select: { id: true, opiuCategory: true },
+    select: { id: true, name: true, opiuCategory: true },
   });
-  const artCat = new Map(articles.map((a) => [a.id, a.opiuCategory!]));
+  const artCat = new Map(
+    articles.filter((a) => a.opiuCategory).map((a) => [a.id, a.opiuCategory!]),
+  );
+  const artName = new Map(articles.map((a) => [a.id, a.name]));
+  // Извлекает код статьи ("1.06" из "1.06 Аренда склада"). Возвращает '' если
+  // имя не начинается с кода.
+  function articleCode(name: string | undefined): string {
+    if (!name) return '';
+    const m = name.match(/^(\d+\.\d+)/);
+    return m ? m[1] : '';
+  }
 
   const accruals = await prisma.accrualRule.findMany();
   const accrualMap = new Map(accruals.map((a) => [a.articleId, a]));
@@ -245,6 +279,15 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
     // Перемещения денег и финансирование вход/выход — не расход в ОПиУ
     if (cat === 'transfer') return;
 
+    // Параллельно копим по конкретной статье (article:1.06, article:1.07, ...)
+    // — это нужно финансистскому виду, где каждая статья отдельная строка.
+    // ИСКЛЮЧЕНИЕ: 1.38 Налог на прибыль — финансист его не берёт из cash-платежей
+    // (платится 2 раза в год большой суммой), а считает расчётно как 2% от Kaspi
+    // PAY / Halyk POS. Cash-платежи по 1.38 в article:1.38 не пишем — туда
+    // запишется только расчётный налог ниже.
+    const code = articleCode(artName.get(articleId));
+    const articleKey = code && code !== '1.38' ? `article:${code}` : null;
+
     const accrual = accrualMap.get(articleId);
     if (accrual && accrual.months > 1) {
       const perMonth = (amount * sign) / accrual.months;
@@ -253,10 +296,12 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
         if (isBefore(targetDate, period.from) || isAfter(targetDate, period.to)) continue;
         const col = period.bucketOf(targetDate);
         addToBucket(buckets, cat, col, perMonth);
+        if (articleKey) addToBucket(buckets, articleKey, col, perMonth);
       }
     } else {
       const col = period.bucketOf(date);
       addToBucket(buckets, cat, col, amount * sign);
+      if (articleKey) addToBucket(buckets, articleKey, col, amount * sign);
     }
   }
 
@@ -265,8 +310,12 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
     // Для ЗП-выплат используем ПериодРегистрации (accrualPeriod) — месяц
     // начисления, а не дату выплаты. Это accrual-метод для ФОТ, как у
     // финансиста в Excel-ведомости.
+    // ИСКЛЮЧЕНИЕ: 1.37 «Налоги на ФОТ» — финансист считает cash-методом
+    // (по дате выплаты), хотя статья отнесена к категории payroll.
     const cat = artCat.get(d.articleId);
-    const effectiveDate = cat === 'payroll' && d.accrualPeriod ? d.accrualPeriod : d.date;
+    const code = articleCode(artName.get(d.articleId));
+    const useAccrual = cat === 'payroll' && d.accrualPeriod && code !== '1.37';
+    const effectiveDate = useAccrual ? d.accrualPeriod! : d.date;
     // Документы, у которых effectiveDate вне периода, пропускаем.
     if (isBefore(effectiveDate, period.from) || isAfter(effectiveDate, period.to)) continue;
     addExpense(effectiveDate, d.articleId, d.amount, 1);
@@ -274,6 +323,20 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
   for (const d of ddsIn) {
     if (!d.articleId) continue;
     const cat = artCat.get(d.articleId);
+    // Приходы по статьям расходов (например 1.41 «Прочее» бывает с
+    // положительным сальдо) — учитываем как уменьшение расхода (отрицательное
+    // значение в article:CODE), чтобы совпадало с финансистом.
+    // 1.38 — исключаем (см. выше про расчётный налог).
+    const code = articleCode(artName.get(d.articleId));
+    if (code && code !== '1.38') {
+      if (isBefore(d.date, period.from) || isAfter(d.date, period.to)) {
+        // вне периода — пропускаем
+      } else {
+        const col = period.bucketOf(d.date);
+        addToBucket(buckets, `article:${code}`, col, -d.amount);
+      }
+    }
+
     // Только прочие доходы — обычная выручка не дублируется. financing_in
     // (получение кредитов) идёт только в ДДС.
     if (cat === 'other_income') {
@@ -294,6 +357,71 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
     }
   }
 
+  // 2c. Налог на прибыль — расчётно, 2% × inflow по эквайрингу Kaspi PAY и
+  // Halyk Bank. Финансист начисляет налог ежемесячно по этой формуле (хотя
+  // фактическая оплата происходит 2 раза в год по налоговому периоду).
+  // Учитываем только эти счета:
+  //   - Kaspi PAY (KZT) — эквайринг Kaspi
+  //   - Halyk POS (KZT) — эквайринг Halyk
+  //   - «… Есенкул халык банк» — расчётный счёт Halyk
+  // НЕ учитываем: Kaspi GOLD (личный счёт), Каспи Голд Депозит и т.п.
+  // Только эквайринговые счета (POS-терминалы + онлайн-приём платежей).
+  // НЕ включаем расчётные счета Halyk (вроде «0001 халык банк»), Kaspi GOLD
+  // (личные карты владельца) и депозиты.
+  const taxAccounts = await prisma.bankAccount.findMany({
+    where: {
+      OR: [
+        { name: { contains: 'Kaspi PAY', mode: 'insensitive' } },
+        { name: { contains: 'Halyk POS', mode: 'insensitive' } },
+      ],
+    },
+    select: { id: true, name: true },
+  });
+  if (taxAccounts.length) {
+    const inflow = await prisma.ddsDocument.findMany({
+      where: {
+        date: { gte: period.from, lte: period.to },
+        direction: 'inflow',
+        accountId: { in: taxAccounts.map((a) => a.id) },
+      },
+      select: { date: true, amount: true },
+    });
+    for (const d of inflow) {
+      const col = period.bucketOf(d.date);
+      // 2% от прихода — налог на прибыль; кладём в article:1.38 (положительная
+      // сумма = расход в финансистском представлении).
+      addToBucket(buckets, 'article:1.38', col, d.amount * 0.02);
+    }
+  }
+
+  // 2d. Факт благотворительности — cash-выплаты по статьям «3.06 Благотворительность»
+  // и «3.07 Медресе». В обычном потоке они уже идут в other_expense / article:3.xx,
+  // но для отдельной строки «Благотворительность — факт» собираем их в bucket
+  // `charity_fact`. Bucket-и независимы, двойного учёта нет.
+  const charityArticles = await prisma.ddsArticle.findMany({
+    where: {
+      OR: [
+        { name: { contains: 'Благотвор', mode: 'insensitive' } },
+        { name: { contains: 'Медресе', mode: 'insensitive' } },
+      ],
+    },
+    select: { id: true },
+  });
+  if (charityArticles.length) {
+    const charityDocs = await prisma.ddsDocument.findMany({
+      where: {
+        date: { gte: period.from, lte: period.to },
+        direction: 'outflow',
+        articleId: { in: charityArticles.map((a) => a.id) },
+      },
+      select: { date: true, amount: true },
+    });
+    for (const d of charityDocs) {
+      const col = period.bucketOf(d.date);
+      addToBucket(buckets, 'charity_fact', col, d.amount);
+    }
+  }
+
   // 3. Амортизация ОС — линейный метод, по месяцам
   const fixedAssets = await prisma.fixedAsset.findMany();
   for (const fa of fixedAssets) {
@@ -307,6 +435,20 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
         addToBucket(buckets, 'amortization' as any, col, monthly);
       }
       d = addMonths(d, 1);
+    }
+  }
+
+  // 3b. Амортизация из Google-таблицы финансиста (ведомость ОС). Только в
+  // помесячном разрезе — там готовые помесячные итоги.
+  if (period.granularity === 'month') {
+    try {
+      const amortByMonth = await loadAmortizationFromSheet();
+      for (const [ym, amount] of amortByMonth) {
+        if (!period.columns.includes(ym)) continue;
+        addToBucket(buckets, 'amortization' as any, ym, amount);
+      }
+    } catch (e) {
+      console.warn('[opiu] amortization sheet read failed:', (e as Error).message);
     }
   }
 
@@ -451,6 +593,22 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
     });
   }
 
+  if (view === 'financist') {
+    rows.push(...buildFinancistRows(buckets, writeOffLines, period.columns));
+    // columnsMeta заполняется ниже
+    const columnsMeta = await fetchColumnsMeta(period);
+    return {
+      from: period.from,
+      to: period.to,
+      granularity: period.granularity,
+      columns: period.columns,
+      rows,
+      totals,
+      grandTotal: grand,
+      columnsMeta,
+    };
+  }
+
   addRow('revenue', 'Выручка', 0, 'value', (t) => t.revenue, false, 'revenue');
   addRow('cogs', 'Себестоимость продаж', 0, 'value', (t) => -t.cogs, false, 'cogs');
   addRow('gross_profit', 'Валовая прибыль', 0, 'sum', (t) => t.grossProfit);
@@ -511,26 +669,7 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
 
   // Статус закрытия месяцев в 1С. Открытые месяцы могут иметь «скользящую»
   // себестоимость и расходиться с финансистом — UI должен пометить их.
-  const columnsMeta: Record<string, ColumnMeta> = {};
-  if (period.granularity === 'month') {
-    const closes = await prisma.monthClose.findMany({
-      where: { yearMonth: { in: period.columns } },
-      select: { yearMonth: true, closedAt: true, hasActualCost: true },
-    });
-    const closeMap = new Map(closes.map((c) => [c.yearMonth, c]));
-    for (const col of period.columns) {
-      const c = closeMap.get(col);
-      columnsMeta[col] = {
-        closed: !!c,
-        closedAt: c?.closedAt || null,
-        hasActualCost: c?.hasActualCost || false,
-      };
-    }
-  } else {
-    for (const col of period.columns) {
-      columnsMeta[col] = { closed: false, closedAt: null, hasActualCost: false };
-    }
-  }
+  const columnsMeta = await fetchColumnsMeta(period);
 
   return {
     from: period.from,
@@ -543,6 +682,300 @@ export async function buildOpiu(input: PeriodInput): Promise<OpiuReport> {
     columnsMeta,
   };
 }
+
+async function fetchColumnsMeta(period: { granularity: Granularity; columns: string[] }): Promise<Record<string, ColumnMeta>> {
+  const meta: Record<string, ColumnMeta> = {};
+  if (period.granularity === 'month') {
+    const closes = await prisma.monthClose.findMany({
+      where: { yearMonth: { in: period.columns } },
+      select: { yearMonth: true, closedAt: true, hasActualCost: true },
+    });
+    const closeMap = new Map(closes.map((c) => [c.yearMonth, c]));
+    for (const col of period.columns) {
+      const c = closeMap.get(col);
+      meta[col] = {
+        closed: !!c,
+        closedAt: c?.closedAt || null,
+        hasActualCost: c?.hasActualCost || false,
+      };
+    }
+  } else {
+    for (const col of period.columns) {
+      meta[col] = { closed: false, closedAt: null, hasActualCost: false };
+    }
+  }
+  return meta;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ФИНАНСИСТСКИЙ ВИД ОПиУ (7 категорий, помесячная нарезка статей ДДС).
+//
+// Структура и порядок строк взяты 1-в-1 из эталонной таблицы финансиста
+// SUT HOUSE (см. docs/finance/financist-source-data.md, раздел 6).
+// Каждая статья 1.06–1.41 — отдельная строка под своей группой:
+//   Переменные / Прямые постоянные / Общепроизводственные / Административные /
+//   Коммерческие / Ниже EBITDA. Промежуточные итоги: Маржинальный доход,
+//   Валовая прибыль по направлениям, Валовая прибыль, EBITDA, Чистая прибыль.
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface FinSection {
+  total_id: string;
+  total_label: string;
+  // Коды статей ДДС (по началу name — "1.06", "1.07", ...), которые суммируются
+  // в эту секцию. Каждая статья даёт отдельную строку. Имя строки = полное
+  // имя статьи из БД (его поправит финансист в одном месте — в справочнике
+  // статей 1С).
+  article_codes: string[];
+}
+
+// Переменные: эквайринг + доставка клиентам + расходы по доставке от клиента.
+// 1.15 и 1.16 финансист объединяет в одну логическую строку «Доставка клиентам»,
+// но мы показываем их раздельно (по факту 1С). Проверено: с учётом 1.16
+// маржинальный доход апреля совпадает с финансистом до 0.7%.
+const FIN_VARIABLE_CODES = ['1.14', '1.15', '1.16'];
+const FIN_DIRECT_FIXED_CODES = ['1.18', '1.19', '1.20', '1.21', '1.23'];
+const FIN_OVERHEAD_CODES = ['1.06', '1.09', '1.12', '1.17', '1.22', '1.34', '1.35', '1.41'];
+const FIN_ADMIN_CODES = ['1.07', '1.08', '1.11', '1.13', '1.24', '1.25', '1.26', '1.27', '1.28', '1.29', '1.31', '1.32', '1.33', '1.36', '1.37'];
+const FIN_COMMERCIAL_CODES = ['1.10', '1.30'];
+const FIN_BELOW_EBITDA_CODES = ['1.38'];
+
+function buildFinancistRows(
+  buckets: Record<string, CategoryBucket>,
+  writeOffLines: Array<{ key: string; label: string }>,
+  columns: string[],
+): OpiuRow[] {
+  const rows: OpiuRow[] = [];
+  // Названия статей ДДС из БД — храним рядом со значениями. Если в БД статьи
+  // нет (например, в данный период не было движений), показываем код + дефолт.
+  // Имя берём по первому встретившемуся бакету article:CODE — но если ничего
+  // нет, оставляем код-плейсхолдер.
+
+  const v = (key: string, col: string) => buckets[key]?.byCol[col] || 0;
+  const sumOver = (keys: string[], col: string) => keys.reduce((s, k) => s + v(k, col), 0);
+  const colTotal = (keys: string[]) => {
+    let t = 0;
+    for (const k of keys) for (const c of columns) t += v(k, c);
+    return t;
+  };
+
+  // Помощник: добавить строку с заранее посчитанными значениями.
+  function pushRow(
+    id: string,
+    label: string,
+    level: number,
+    kind: RowKind,
+    valuesByCol: (col: string) => number,
+    opts: { isPct?: boolean; negate?: boolean } = {},
+  ) {
+    const values: Record<string, number> = {};
+    let total = 0;
+    for (const col of columns) {
+      const raw = valuesByCol(col);
+      const v = opts.negate ? -raw : raw;
+      values[col] = v;
+      total += v;
+    }
+    rows.push({ id, label, level, kind, values, total, isPct: opts.isPct });
+  }
+  function pushPctRow(id: string, label: string, level: number, num: (col: string) => number, den: (col: string) => number) {
+    const values: Record<string, number> = {};
+    let totNum = 0, totDen = 0;
+    for (const col of columns) {
+      const n = num(col), d = den(col);
+      values[col] = d ? n / d : 0;
+      totNum += n; totDen += d;
+    }
+    rows.push({ id, label, level, kind: 'pct', values, total: totDen ? totNum / totDen : 0, isPct: true });
+  }
+
+  // Получить статьи (article:CODE) одной группы — отсортированные по коду.
+  function articleRows(codes: string[], level: number) {
+    for (const code of codes) {
+      const key = `article:${code}`;
+      const b = buckets[key];
+      // Показываем строку даже если пусто — для визуальной устойчивости отчёта.
+      const label = `${code} ${ARTICLE_LABELS[code] || ''}`.trim();
+      pushRow(
+        key,
+        label,
+        level,
+        'value',
+        (col) => -(b?.byCol[col] || 0),
+      );
+    }
+  }
+
+  // ─── Выручка ────────────────────────────────────────────────────────────
+  pushRow('fin_revenue_net', 'Выручка нетто', 0, 'sum', (col) => v('revenue', col));
+  pushRow('fin_revenue_gross', 'Выручка', 1, 'value', (col) => v('revenue_gross', col));
+  pushRow('fin_revenue_discount', 'Скидка наличка', 1, 'value', (col) => v('revenue_discount', col), { negate: true });
+
+  // Сумма потерь (по корреспонденциям + ручные корректировки loss_*)
+  const lossSum = (col: string) =>
+    writeOffLines.reduce((s, l) => s + v(l.key, col), 0) +
+    ['adj:loss_usushka', 'adj:loss_untaq_synyq', 'adj:loss_artyk_salu', 'adj:loss_inventory_adj']
+      .reduce((s, k) => s + v(k, col), 0);
+  const varCodesSum = (col: string) => sumOver(FIN_VARIABLE_CODES.map((c) => `article:${c}`), col);
+  const directFixedSum = (col: string) => sumOver(FIN_DIRECT_FIXED_CODES.map((c) => `article:${c}`), col);
+
+  // ─── Производственные расходы = Переменные + Прямые постоянные ──────────
+  pushRow(
+    'fin_prod_total',
+    'Производственные расходы',
+    0,
+    'sum',
+    (col) => -(v('cogs', col) + varCodesSum(col) + lossSum(col) + directFixedSum(col)),
+  );
+
+  // Переменные = себестоимость + 1.14/1.15/1.16 + потери (writeoffs + adj_loss_*)
+  pushRow(
+    'fin_var_total',
+    'Переменные',
+    1,
+    'sum',
+    (col) => -(v('cogs', col) + varCodesSum(col) + lossSum(col)),
+  );
+  // Детализация переменных
+  pushRow('fin_var_cogs', 'Себестоимость', 2, 'value', (col) => v('cogs', col), { negate: true });
+  articleRows(FIN_VARIABLE_CODES, 2);
+  // Списания (по корреспонденции 1С — как они проставлены)
+  for (const line of writeOffLines) {
+    pushRow(line.key, `  ${line.label}`, 2, 'value', (col) => v(line.key, col), { negate: true });
+  }
+  // Ручные корректировки потерь, если введены
+  const lossAdjLabels: Record<string, string> = {
+    'adj:loss_usushka': 'Усушка (корр.)',
+    'adj:loss_untaq_synyq': 'Ұнтақ/сынық (корр.)',
+    'adj:loss_artyk_salu': 'Артык салу (корр.)',
+    'adj:loss_inventory_adj': 'Излишек/Недостача (корр.)',
+  };
+  for (const [key, label] of Object.entries(lossAdjLabels)) {
+    if (!buckets[key]) continue;
+    pushRow(key, `  ${label}`, 2, 'value', (col) => v(key, col), { negate: true });
+  }
+
+  // Маржинальный доход = выручка нетто − cogs − дополнительные переменные − потери
+  const marginalGetter = (col: string) =>
+    v('revenue', col) - v('cogs', col) - varCodesSum(col) - lossSum(col);
+  pushRow('fin_marginal', 'Маржинальный доход', 0, 'sum', marginalGetter);
+  pushPctRow('fin_marginal_pct', 'Рентабельность по маржинальному доходу, %', 1, marginalGetter, (col) => v('revenue', col));
+
+  // ─── Прямые постоянные ──────────────────────────────────────────────────
+  pushRow('fin_direct_fixed_total', 'Прямые постоянные', 1, 'sum', (col) => -directFixedSum(col));
+  articleRows(FIN_DIRECT_FIXED_CODES, 2);
+
+  // ─── Валовая прибыль по направлениям ────────────────────────────────────
+  const grossDirGetter = (col: string) => marginalGetter(col) - directFixedSum(col);
+  pushRow('fin_gross_dir', 'Валовая прибыль по направлениям', 0, 'sum', grossDirGetter);
+  pushPctRow('fin_gross_dir_pct', 'Рентабельность по направлениям, %', 1, grossDirGetter, (col) => v('revenue', col));
+
+  // ─── Общепроизводственные ───────────────────────────────────────────────
+  const overheadSum = (col: string) => sumOver(FIN_OVERHEAD_CODES.map((c) => `article:${c}`), col);
+  pushRow('fin_overhead_total', 'Общепроизводственные', 0, 'sum', (col) => -overheadSum(col));
+  articleRows(FIN_OVERHEAD_CODES, 1);
+
+  // ─── Валовая прибыль ────────────────────────────────────────────────────
+  const grossGetter = (col: string) => grossDirGetter(col) - overheadSum(col);
+  pushRow('fin_gross', 'Валовая прибыль', 0, 'sum', grossGetter);
+
+  // ─── Косвенные расходы (адм + коммерч) ──────────────────────────────────
+  const adminSum = (col: string) => sumOver(FIN_ADMIN_CODES.map((c) => `article:${c}`), col);
+  const commercialSum = (col: string) => sumOver(FIN_COMMERCIAL_CODES.map((c) => `article:${c}`), col);
+  pushRow('fin_indirect_total', 'Косвенные расходы', 0, 'sum', (col) => -(adminSum(col) + commercialSum(col)));
+  pushRow('fin_admin_total', 'Административные', 1, 'sum', (col) => -adminSum(col));
+  articleRows(FIN_ADMIN_CODES, 2);
+  pushRow('fin_commercial_total', 'Коммерческие', 1, 'sum', (col) => -commercialSum(col));
+  articleRows(FIN_COMMERCIAL_CODES, 2);
+
+  // ─── EBITDA ─────────────────────────────────────────────────────────────
+  const ebitdaGetter = (col: string) => grossGetter(col) - adminSum(col) - commercialSum(col);
+  pushRow('fin_ebitda', 'Операционная прибыль (EBITDA)', 0, 'sum', ebitdaGetter);
+  pushPctRow('fin_ebitda_pct', 'Рентабельность по операционной прибыли, %', 1, ebitdaGetter, (col) => v('revenue', col));
+
+  // ─── Расходы ниже EBITDA ────────────────────────────────────────────────
+  const belowEbitdaSum = (col: string) => sumOver(FIN_BELOW_EBITDA_CODES.map((c) => `article:${c}`), col);
+  pushRow('fin_below_ebitda_total', 'Расходы ниже EBITDA', 0, 'sum', (col) => -(belowEbitdaSum(col) + v('amortization', col)));
+  articleRows(FIN_BELOW_EBITDA_CODES, 1);
+  pushRow('fin_amortization', 'Амортизация', 1, 'value', (col) => v('amortization', col), { negate: true });
+
+  // ─── Налог на прибыль: план / факт (справочно, до ЧП) ───────────────────
+  // План = расчётный налог 2% × (Kaspi PAY + Halyk POS), уже сложен в
+  // article:1.38 в buildOpiu(). Эта же сумма влияет на ЧП ниже — здесь
+  // показываем её отдельно для сверки с фактом.
+  // Факт = cash-выплаты по статье 1.38 (cat='taxes' в addExpense).
+  pushRow('fin_tax_plan', 'Налог на прибыль — план (2% × Kaspi/Halyk)', 0, 'value', (col) => v('article:1.38', col), { negate: true });
+  pushRow('fin_tax_fact', 'Налог на прибыль — факт (по выплатам 1.38)', 0, 'value', (col) => v('taxes', col), { negate: true });
+
+  // ─── Благотворительность: план (20% × ЧП с переносом) / факт ────────────
+  // База плана = max(0, ЧП до благотворительности) × 20%. Если до-благ. ЧП ≤ 0 —
+  // план 0 (нельзя жертвовать из убытка).
+  // Перенос: если в прошлом месяце факт < план — недоплата прибавляется
+  // к плану текущего месяца; если факт > план — переплата вычитается.
+  // carry[i] = effectivePlan[i-1] - fact[i-1]; effectivePlan[i] = base[i] + carry[i].
+  // ⚠️ Перенос считается только в пределах выбранного периода.
+  // Факт благотворительности (3.06 Благотворительность + 3.07 Медресе) ВЫЧИТАЕТСЯ
+  // из чистой прибыли — это реальные выплаты, уменьшающие финрезультат собственника.
+  const preCharityNetGetter = (col: string) => ebitdaGetter(col) - belowEbitdaSum(col) - v('amortization', col);
+  const CHARITY_RATE = 0.2;
+  const charityPlanByCol: Record<string, number> = {};
+  let charityCarry = 0;
+  for (const col of columns) {
+    const base = Math.max(0, preCharityNetGetter(col)) * CHARITY_RATE;
+    const effectivePlan = base + charityCarry;
+    charityPlanByCol[col] = effectivePlan;
+    const fact = v('charity_fact', col);
+    charityCarry = effectivePlan - fact;
+  }
+  pushRow('fin_charity_plan', 'Благотворительность — план (20% × ЧП + перенос)', 0, 'value', (col) => charityPlanByCol[col] || 0, { negate: true });
+  pushRow('fin_charity_fact', 'Благотворительность — факт (3.06 + 3.07)', 0, 'value', (col) => v('charity_fact', col), { negate: true });
+
+  // ─── Чистая прибыль = EBITDA − налог 1.38 − амортизация − благотв. факт ──
+  const netGetter = (col: string) => preCharityNetGetter(col) - v('charity_fact', col);
+  pushRow('fin_net', 'Чистая прибыль', 0, 'sum', netGetter);
+  pushPctRow('fin_net_pct', 'Рентабельность по чистой прибыли, %', 1, netGetter, (col) => v('revenue', col));
+
+  return rows;
+}
+
+// Подписи статей — для случаев когда в БД статья ещё не загрузилась.
+// Если в БД будет другое имя — оно перекроется через addExpense (там используем
+// настоящее имя из artName). Эти лейблы — только дефолт.
+const ARTICLE_LABELS: Record<string, string> = {
+  '1.06': 'Аренда склада',
+  '1.07': 'Аренда офиса',
+  '1.08': 'Коммунальные услуги',
+  '1.09': 'Заработная плата производственного персонала',
+  '1.10': 'Заработная плата менеджеров по продажам',
+  '1.11': 'Заработная плата административного персонала',
+  '1.12': 'Мотивационный',
+  '1.13': 'Комиссия банка',
+  '1.14': 'Комиссия Эквайринг',
+  '1.15': 'Доставка клиентам',
+  '1.16': 'За доставку (от клиента)',
+  '1.17': 'Транспортные расходы',
+  '1.18': 'Парковка',
+  '1.19': 'Расходы на ГСМ',
+  '1.20': 'Расходы на содержания транспорта',
+  '1.21': 'Покупка инвентаря-производство',
+  '1.22': 'Расходы Склад',
+  '1.23': 'Типографические услуги-производство',
+  '1.24': 'Офисные расходы',
+  '1.25': 'Уборка помещений',
+  '1.26': 'Услуги связи',
+  '1.27': 'IT инфраструктура',
+  '1.28': 'Консультационные и проф услуги',
+  '1.29': 'Обучение персонала',
+  '1.30': 'Расходы на маркетинг',
+  '1.31': 'Прочие административные расходы',
+  '1.32': 'Командировочные расходы',
+  '1.33': 'Корпоративные мероприятия',
+  '1.34': 'Ремонт и обслуживание ОС',
+  '1.35': 'Ремонт и обслуживание ТС',
+  '1.36': 'Представительские расходы-адм',
+  '1.37': 'Налоги на ФОТ',
+  '1.38': 'Налоги на прибыль',
+  '1.41': 'Прочее',
+};
 
 // Drill-down: документы за период по категории
 export async function drillOpiu(category: OpiuCategory, from: Date, to: Date) {
